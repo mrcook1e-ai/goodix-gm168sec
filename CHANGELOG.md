@@ -51,6 +51,16 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   Wallis output is clamped to 16 bits, SSM generation access uses a real common
   base subobject, and obsolete framing/CLAHE code was removed.
 
+### Validation
+- Offline targeted/full suites passed (`7 OK`, `34` disabled-driver skips), the
+  standalone timeout contract passed, and both direct and Meson Valgrind runs
+  completed with no errors or lost blocks.
+- Live APP 10036 smoke testing completed cold INIT/TLS/BG and `12` successful
+  enroll stages across `15` touches before a `G_IO_ERROR_CANCELLED` stop. No
+  TLS, background, REARM/RECOVER, or watchdog failure was observed; median
+  dual-capture time was `70 ms`. A full `20/20` enroll and USB hotplug fault
+  injection remain separate validation steps.
+
 ### Known limitations
 - Tested only on limited `27c6:589a` hardware (`GFUSB_GM168SEC_APP_10036`) with
   a small FAR/FRR sample set.
