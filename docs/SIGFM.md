@@ -21,7 +21,8 @@ flowchart LR
     SIFT --> INFO["SigfmImgInfo<br/>keypoints + CV_32F 128-D descriptors"]
     INFO --> KNN["cv::BFMatcher(NORM_L2)<br/>knnMatch(probe, enrolled, k=2)"]
     KNN --> LOWE["Lowe Ratio Filter<br/>d0 < 0.80 * d1 (min 3 matches)"]
-    LOWE --> RANSAC["cv::estimateAffinePartial2D(RANSAC)<br/>reproj=4.0px, maxIters=2000, conf=0.99"]
+    LOWE --> RECIP["Reciprocal 1-NN Gate<br/>enrolled → probe must return the same pair"]
+    RECIP --> RANSAC["cv::estimateAffinePartial2D(RANSAC)<br/>reproj=4.0px, maxIters=2000, conf=0.99"]
     RANSAC --> GUARDS["Degenerate Model Guards<br/>0.80 <= scale <= 1.25<br/>inliers / good_matches >= 0.40"]
     GUARDS --> SCORE["Return inliers (>= 8 = match)"]
 ```
@@ -36,13 +37,15 @@ flowchart LR
 | SIFT edge threshold | `kSiftEdgeThreshold` | `20.0` | Retains ridge-adjacent edge features rejected by default `10.0` |
 | SIFT Gaussian sigma | `kSiftSigma` | `1.6` | Base smoothing scale |
 | Lowe ratio test | `kLoweRatio` | `0.80` | Keeps distinctive `k=2` nearest-neighbor pairs |
-| Minimum ratio pairs | `kMinGoodMatches` | `3` | Minimum correspondences required before calling `estimateAffinePartial2D` |
+| Reciprocal gate | reverse `knnMatch(..., k=1)` | required | A forward pair survives only when the enrolled descriptor's nearest probe descriptor is the original query; removes many-to-one ambiguity without relaxing Lowe's ratio |
+| Minimum ratio pairs | `kMinGoodMatches` | `3` | Minimum reciprocal correspondences required before calling `estimateAffinePartial2D` |
 | RANSAC reprojection | `kRansacReprojThreshold` | `4.0 px` | Geometric tolerance in `160x128` pixel coordinates |
 | RANSAC iterations / confidence | `kRansacMaxIters` / `kRansacConfidence` | `2000` / `0.99` | Bounded 4-DoF partial-affine solver |
 | Scale sanity window | `kMinScale` .. `kMaxScale` | `0.80 .. 1.25` | Rejects collapsed/exploded affine fits (`scale = hypot(a00, a01)`) |
-| Minimum inlier fraction | `kMinInlierRatio` | `0.40` | Requires `>= 40%` of Lowe-filtered pairs to agree with the RANSAC model |
+| Minimum inlier fraction | `kMinInlierRatio` | `0.40` | Requires `>= 40%` of reciprocal pairs to agree with the RANSAC model |
+| Experimental translation consensus | `SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS` | **off** | Optional post-RANSAC cluster gate for offline A/B tests only; not used by `sigfm_match_score()` or the GM168 driver |
 
-Unlike earlier SIGFM implementations that ran an $O(M^4)$ pairwise length/angle consistency loop, this implementation uses OpenCV's `cv::estimateAffinePartial2D` with explicit `scale` and `inlier_ratio` guards to reject degenerate point-collapse matches cleanly.
+Unlike earlier SIGFM implementations that ran an $O(M^4)$ pairwise length/angle consistency loop, this implementation uses reciprocal nearest neighbours followed by OpenCV's `cv::estimateAffinePartial2D` with explicit `scale` and `inlier_ratio` guards to reject degenerate point-collapse matches cleanly.
 
 ## `SGFM` v1 Binary Format and `FP3` Core Integration
 
@@ -74,7 +77,7 @@ When `driver/goodix_gm168.c` submits an `FpImage` via `fpi_image_device_image_ca
 
 1. `fpi_image_device_image_captured()` sees `priv->algorithm == FPI_PRINT_SIGFM` and launches `fpi_image_extract_sigfm_info()` while transitioning to `AWAIT_FINGER_OFF`.
 2. An atomic CAS on `self->detection_in_progress` prevents concurrent extraction on the same `FpImage` (`G_IO_ERROR_ADDRESS_IN_USE`).
-3. `fpi_image_extract_sigfm_thread_func()` copies and normalizes image data for `FPI_IMAGE_H_FLIPPED`, `FPI_IMAGE_V_FLIPPED`, and `FPI_IMAGE_COLORS_INVERTED` (clearing those normalization flags while preserving `FPI_IMAGE_PARTIAL`), runs `sigfm_extract()` off the main loop, and fails if `sigfm_keypoints_count() <= 0` (`Feature detection failed, please retry`).
+3. `fpi_image_extract_sigfm_thread_func()` copies and normalizes image data for `FPI_IMAGE_H_FLIPPED`, `FPI_IMAGE_V_FLIPPED`, and `FPI_IMAGE_COLORS_INVERTED` (clearing those normalization flags while preserving `FPI_IMAGE_PARTIAL`), runs `sigfm_extract()` and `sigfm_image_coverage()` off the main loop, and stores both the feature set and normalized-frame coverage. Empty feature sets are valid extraction results; `FpImageDevice` applies the driver-specific quality policy and returns `FP_DEVICE_RETRY_CENTER_FINGER` instead of treating them as an internal extraction failure.
 
 ## Driver Parameters, 20 Stages, Anti-Dup, and Verify Auto-Retry
 
@@ -87,6 +90,33 @@ When `driver/goodix_gm168.c` submits an `FpImage` via `fpi_image_device_image_ca
 | Match threshold | `GM168_SIGFM_THRESHOLD` | `8` | Minimum RANSAC inliers against any enrolled stage in `FpPrint` |
 | Enroll anti-dup threshold | `GM168_SIGFM_DUP_THRESHOLD` (`$GM168_DUP_THRESH`, `0..1000`) | `15` | Rejects stages scoring `>= 15` against existing stages with `FP_DEVICE_RETRY_GENERAL` ("Duplicate finger placement, please shift finger"); stops rejecting after `SIGFM_MAX_CONSECUTIVE_DUP_REJECTS = 6` consecutive duplicates so enrollment cannot stall |
 | Verify auto-retry count | `GM168_SIGFM_VERIFY_RETRIES` (`$GM168_VERIFY_RETRIES`, `0..5`) | `2` | On `IDENTIFY` no-match, emits `FP_DEVICE_RETRY_GENERAL` up to `2` times (allowing up to `3` touches per verification attempt) before reporting final no-match; resets on match, cancel, close, or fatal error |
+| Minimum keypoints | `GM168_SIGFM_MIN_KEYPOINTS` (`$GM168_SIGFM_MIN_KEYPOINTS`, `0..1000`) | `30` | Rejects feature-poor frames with `FP_DEVICE_RETRY_CENTER_FINGER`; `0` disables this gate |
+| Minimum ridge-like coverage | `GM168_SIGFM_MIN_COVERAGE` (`$GM168_SIGFM_MIN_COVERAGE`, `0..1`) | `0.55` | Enrollment/capture requires at least 55% active `8x8` tiles. Verification checks coverage only after no-match, so a successful low-coverage match remains valid; `0` disables this gate |
+
+### SIGFM Capture Quality Gate
+
+This gate is distinct from the driver's earlier central-contrast/dual-capture heuristic. It runs **after image normalization and SIFT extraction**:
+
+- `sigfm_image_coverage()` ignores a `2 px` outer border, scans complete non-overlapping `8x8` tiles, and marks a tile active when its grey-level standard deviation is at least `25`.
+- Fewer than `30` keypoints always produces `FP_DEVICE_RETRY_CENTER_FINGER` when the GM168 gate is enabled.
+- Enrollment and raw capture also require `coverage >= 0.55`.
+- Verification/identification first permits matching when the keypoint count is sufficient. Only a **no-match** on a low-coverage frame becomes `FP_DEVICE_RETRY_CENTER_FINGER`; a successful match is not discarded. This path does not increment the bounded no-match retry counter.
+- Other SIGFM devices default to a safe minimum of one keypoint and no coverage requirement unless their driver configures the gate.
+
+The `30` / `0.55` values are provisional capture-policy heuristics adapted from a different `80x64` Goodix pipeline. They are **not** calibrated GM168 FAR/FRR parameters and still require live A/B validation on the GM168 `160x128` preprocessing path.
+
+### Deferred Deactivation
+
+A non-cancelling deactivation request is held in `action_pending_deactivation` while the finger is present or asynchronous feature extraction is active. The request is resumed only after both conditions clear; final enrollment therefore cannot tear down USB state while the final frame is still being processed, and verify deactivation does not race SIFT. Explicit cancellation always bypasses this deferral. This core lifecycle guard complements—but does not replace—the GM168 `REARM`/generation/cancellation state machines.
+
+### Translation-Consensus A/B Switch (Default Off)
+
+`sigfm_match_score_with_flags()` exposes two internal experimental switches for deterministic offline comparisons:
+
+- `SIGFM_MATCH_FLAG_FORWARD_ONLY` ablates reciprocal matching and reproduces the former one-way candidate path.
+- `SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS` projects RANSAC inliers through the accepted similarity model, clusters their residual translations within `4 px`, and applies the existing `0.40` fraction guard to the largest cluster.
+
+Production `sigfm_match_score()` uses reciprocal matching with translation consensus **disabled**. The synthetic suite exercises both switches but does not establish a genuine/impostor advantage. Enable translation consensus in the driver only after comparing both variants on identical saved GM168 frames, with fixed RANSAC seeds and separately reported genuine and impostor outcomes. No production threshold or template-format change is currently authorized by the synthetic A/B test.
 
 ### Template Incompatibility with NBIS
 
@@ -94,6 +124,7 @@ When `driver/goodix_gm168.c` submits an `FpImage` via `fpi_image_device_image_ca
 
 ## Accuracy and FAR / FRR Limitations
 
-- **Limited hardware sample**: `GM168_SIGFM_THRESHOLD = 8` was chosen from offline evaluation on one `27c6:589a` device (`GFUSB_GM168SEC_APP_10036`), where non-overlapping same-finger zones peaked at `5` raw inliers (`0/300 >= 6` with the production `scale` + `inlier_ratio` guards) and genuine overlaps scored `12..68+`, followed by limited live enrollment (`20/20`) and verification (`5/5`, `FAR=0` on a small impostor sample).
+- **Limited hardware sample**: `GM168_SIGFM_THRESHOLD = 8` was chosen from offline evaluation on one `27c6:589a` device (`GFUSB_GM168SEC_APP_10036`), where non-overlapping same-finger zones peaked at `5` raw inliers (`0/300 >= 6` with the production `scale` + `inlier_ratio` guards) and genuine overlaps scored `12..68+`, followed by limited live enrollment (`20/20`) and verification (`5/5`, `FAR=0` on a small impostor sample). Those live results predate reciprocal matching, the SIGFM coverage gate, and deferred deactivation; they are historical baseline evidence, not live validation of the revised implementation.
+- **Current revision: offline proof only**: reciprocal many-to-one rejection, tiled-coverage classification, lifecycle guards, frame decoding, and the opt-in translation-consensus path have synthetic regression tests. No post-change live enroll/verify or genuine/impostor A/B run has been performed.
 - **Not population-validated**: true False Accept Rate (FAR) and False Reject Rate (FRR) across diverse users, skin conditions, and independent `27c6:589a` devices have **not** been measured.
 - **Retry multiplier**: setting `GM168_SIGFM_VERIFY_RETRIES = 2` reduces false rejections caused by touching an uncovered edge of the `4 × 3.2 mm` pad, at the cost of granting an impostor up to `3` touches per authentication session. Always retain password fallback for login, `sudo`, and `polkit`.

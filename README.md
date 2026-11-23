@@ -39,8 +39,9 @@ matching and read-only in-memory PSK recovery.
   `GFUSB_GM168SEC_APP_10036` (the only currently confirmed firmware revision).
 - **Platform tested**: Fedora 45 with OpenSSL 3 (`openssl3-devel` /
   `openssl >= 3.0, < 4.0`).
-- **Matching pipeline**: `FPI_PRINT_SIGFM` (OpenCV SIFT + RANSAC affine check)
-  instead of NBIS, using 20 enrollment stages with anti-duplicate filtering,
+- **Matching pipeline**: `FPI_PRINT_SIGFM` (OpenCV SIFT + reciprocal matching +
+  RANSAC affine check) instead of NBIS, using 20 enrollment stages with
+  anti-duplicate filtering, a keypoint/coverage quality gate, deferred teardown,
   bounded verify auto-retry, and a 2x bilinear upscale to `160x128`.
 - **Background & calibration**: dynamic 5-frame dark background capture and
   subtraction works out of the box without per-device calibration files.
@@ -51,7 +52,9 @@ matching and read-only in-memory PSK recovery.
   false accept / false reject behavior. Cross-device compatibility, other
   firmware revisions, hotplug behavior, and suspend/resume lifecycle are not
   broadly validated and should not be assumed production-ready. Always keep a
-  password authentication fallback configured.
+  password authentication fallback configured. The latest reciprocal/quality/
+  lifecycle changes have offline synthetic proof only; earlier live results do
+  not validate this revision.
 
 ## AI-assisted development and "as is" notice
 
@@ -151,12 +154,13 @@ After the isolated build above, run the synthetic recovery and matching suites:
 
 ```bash
 meson test -C build \
-  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests \
+  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
   --print-errorlogs
 ```
 
 This exercises pinned cryptographic vectors, malformed DPAPI/TLV inputs, SIGFM
-serialization/matching, and negative controls without accessing a sensor. See
+serialization/matching/reciprocal/quality behavior, packed-frame layout, and
+negative controls without accessing a sensor. See
 [`docs/TESTING.md`](docs/TESTING.md) for Valgrind and the offline-vs-live proof
 boundary.
 

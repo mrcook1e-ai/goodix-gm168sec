@@ -6,10 +6,10 @@ This repository is a public source overlay for the experimental **Goodix GM168SE
 
 Keep changes strictly separated by responsibility:
 
-- `driver/` — Canonical C11 driver sources and headers (`goodix_gm168.c`, `goodix_proto.{c,h}`, `goodix_tls.{c,h}`, `gm168_psk_recovery.{c,h}`, `gm168_timeouts.h`, `gm168_usb_errors.h`, `gm168_trace.h`, `gm168_log.{c,h}`). Copied directly into `libfprint/drivers/goodix_gm168/` by `tools/apply-overlay.sh`.
-- `patches/libfprint-v1.94.100-integration.patch` — Integration patch against pinned upstream `libfprint v1.94.100` (`80a4b5ec612892c5c056c48dddaa561452cf37ec`). Houses `libfprint/sigfm/*`, core `FPI_PRINT_SIGFM` hooks, `tests/test-fpi-sigfm.c`, OpenSSL 3 build policy (`>= 3.0, < 4.0`), `libfprint/meson.build` / `tests/meson.build` driver wiring, and `fprint-list-udev-hwdb.c` allowlist cleanup.
+- `driver/` — Canonical C11 driver sources and headers (`goodix_gm168.c`, `goodix_proto.{c,h}`, `goodix_tls.{c,h}`, `gm168_psk_recovery.{c,h}`, `gm168_frame_layout.h`, `gm168_timeouts.h`, `gm168_usb_errors.h`, `gm168_trace.h`, `gm168_log.{c,h}`). Copied directly into `libfprint/drivers/goodix_gm168/` by `tools/apply-overlay.sh`.
+- `patches/libfprint-v1.94.100-integration.patch` — Integration patch against pinned upstream `libfprint v1.94.100` (`80a4b5ec612892c5c056c48dddaa561452cf37ec`). Houses `libfprint/sigfm/*`, core `FPI_PRINT_SIGFM` hooks, `tests/test-fpi-sigfm.c`, `tests/test-goodix-gm168-frame-layout.c`, OpenSSL 3 build policy (`>= 3.0, < 4.0`), `libfprint/meson.build` / `tests/meson.build` driver wiring, and `fprint-list-udev-hwdb.c` allowlist cleanup.
 - `tools/apply-overlay.sh` — Enforces clean `v1.94.100` target checkout, copies `driver/*` and `tests/test-goodix-gm168-psk-recovery.c`, checks and applies `patches/libfprint-v1.94.100-integration.patch`.
-- `tests/` — Standalone compile-time timeout contract check (`tests/test_timeouts.c`). PSK recovery tests (`tests/test-goodix-gm168-psk-recovery.c`) and SIGFM tests (`tests/test-fpi-sigfm.c`, `libfprint/sigfm/tests.cpp`) run inside the patched `libfprint` build tree.
+- `tests/` — Standalone compile-time timeout contract check (`tests/test_timeouts.c`). PSK recovery tests (`tests/test-goodix-gm168-psk-recovery.c`), SIGFM tests (`tests/test-fpi-sigfm.c`, `libfprint/sigfm/tests.cpp`), and the packed-frame layout test (`tests/test-goodix-gm168-frame-layout.c`) run inside the patched `libfprint` build tree.
 - `packaging/` — Udev `uaccess` rule (`packaging/udev/70-goodix-gm168.rules`) and experimental Fedora RPM spec (`packaging/fedora/libfprint-goodix-gm168.spec`).
 - `docs/` & root policies (`README.md`, `INSTALL.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`) — Curated technical documentation and safety boundaries.
 
@@ -52,7 +52,7 @@ meson compile -C ./build
 
 # Targeted driver, recovery, and SIGFM suites
 meson test -C ./build \
-  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests \
+  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
   --print-errorlogs
 
 # Full meson suite (expect all enabled targets OK; disabled drivers skipped)
@@ -76,7 +76,7 @@ valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1 \
   ./build/tests/test-goodix-gm168-psk-recovery
 
 meson test -C ./build --setup=valgrind \
-  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests \
+  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
   --print-errorlogs
 ```
 
@@ -91,6 +91,10 @@ Confirm:
 Never mix `driver/` changes or `tests/test-goodix-gm168-psk-recovery.c` into `patches/libfprint-v1.94.100-integration.patch`. Whenever core `libfprint`, `libfprint/sigfm/`, `meson.build`, or upstream-owned tests change inside a patched `libfprint` checkout are finalized, regenerate the patch while excluding both overlay-owned source paths:
 
 ```bash
+# Include new untracked SIGFM/test files without committing or content-staging.
+git -C ./libfprint-src add -N \
+  libfprint/sigfm tests/test-fpi-sigfm.c tests/test-goodix-gm168-frame-layout.c
+
 git -C ./libfprint-src diff \
   80a4b5ec612892c5c056c48dddaa561452cf37ec \
   -- ':!libfprint/drivers/goodix_gm168/**' \
@@ -104,7 +108,7 @@ git diff --check
 
 - **GNU C99 (`driver/`, `libfprint` C core)**: follow `libfprint` / GLib idioms (`g_autofree`, `g_autoptr`, `GError` propagation, no large 16 KiB stack arrays). Preserve `LGPL-2.1-or-later` SPDX headers and attribution in `NOTICE`.
 - **OpenSSL 3 compatibility**: use `EVP_Digest()`, `EVP_Cipher*` / `EVP_Encrypt*` / `EVP_Decrypt*`, `HMAC()`, `OPENSSL_cleanse()`, and `CRYPTO_memcmp()`; never use deprecated OpenSSL 1.1 APIs such as `HMAC_CTX`. Keep the Meson OpenSSL `>= 3.0, < 4.0` check intact.
-- **C++17 (`libfprint/sigfm/`)**: validate bounds, magic/version, and IEEE-754 finiteness (`std::isfinite`) on all deserialized keypoints/descriptors; keep `sigfm-tests` deterministic on synthetic patterns only.
+- **C++17 (`libfprint/sigfm/`)**: validate bounds, magic/version, and IEEE-754 finiteness (`std::isfinite`) on all deserialized keypoints/descriptors; keep `sigfm-tests` deterministic on synthetic patterns only. Production matching must retain reciprocal filtering; `SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS` and `SIGFM_MATCH_FLAG_FORWARD_ONLY` are offline A/B controls, not driver defaults.
 - **Async USB & SSM invariants**: every USB transfer and timer must route through `FpiSsm`, check `gm168_ssm_is_current()` (generation guard) and `gm168_ssm_deadline_expired()`, use `self->io_cancellable`, and classify errors via `gm168_classify_usb_error()`. Update matching `_Static_assert`s in `driver/gm168_timeouts.h` and `tests/test_timeouts.c` if any timing constant changes.
 - **Read-only recovery invariants**: `driver/gm168_psk_recovery.c` must remain pure in-memory C (no USB, no filesystem I/O). Never hard-code DPAPI offsets (always parse dynamically), never weaken zero-PSK sentinels or canonical IV/HMAC checks, and never trigger recovery after a TLS failure.
 

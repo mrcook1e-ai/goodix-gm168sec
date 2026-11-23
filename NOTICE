@@ -44,6 +44,14 @@ implementation by:
 licensed under LGPL-2.1-or-later, adapted for libfprint v1.94.100 and small
 capacitive sensors with enrollment anti-duplication and verify retry support.
 
+The reciprocal matching, tiled capture-coverage gate, deferred-deactivation
+lifecycle, and experimental post-RANSAC translation-consensus A/B variant were
+adapted from the Goodix 27c6:581a implementation by Space-Dev0:
+https://github.com/Space-Dev0/goodix-fingerprint-drivers
+also licensed under LGPL-2.1-or-later. The GM168 integration retains its own
+SIFT parameters, Lowe ratio, RANSAC model, scale/inlier bounds, SGFM v1 format,
+and production defaults; translation consensus is not enabled by the driver.
+
 Clean-room provenance note
 --------------------------
 The 27c6:589a protocol and image-processing path were studied from USB traffic

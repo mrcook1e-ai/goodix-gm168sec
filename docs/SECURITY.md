@@ -47,8 +47,17 @@ Never commit or upload to issues/PRs:
 ## Authentication policy
 
 This driver is an experimental community preview with limited FAR/FRR testing
-and no independent security audit. Always keep password authentication enabled
-for login, `sudo`, and `polkit`.
+and no independent security audit. Reciprocal matching removes ambiguous pairs
+but does not establish a new measured false-accept boundary. The revised
+matcher/quality/lifecycle code has synthetic proof only until a post-change live
+genuine/impostor A/B run is completed.
+
+The keypoint/coverage gate changes unsuitable captures into centered-finger
+retries; it is not an anti-spoofing mechanism. Quality retries are separate from
+bounded no-match retries, and a geometrically successful low-coverage match is
+still accepted. The experimental translation-consensus flag is offline-only and
+disabled in production. Always keep password authentication enabled for login,
+`sudo`, and `polkit`.
 
 Report vulnerabilities privately via GitHub security advisories on
 `mrcook1e-ai/goodix-gm168sec` rather than public issues.

@@ -15,6 +15,7 @@
 #include "goodix_proto.h"
 #include "goodix_tls.h"
 #include "gm168_psk_recovery.h"
+#include "gm168_frame_layout.h"
 #include "gm168_timeouts.h"
 #include "gm168_trace.h"
 #include "gm168_usb_errors.h"
@@ -43,18 +44,8 @@
  *   80 × 96 bytes encode 80 × 64 logical pixels; the enclave transposes them
  *   to 64 × 80 row-major uint16 = what the preprocessor consumes.
  */
-#define GM168_TLS_FRAME_SIZE   10564
-#define GM168_TLS_PAYLOAD_SIZE 10560   /* 80 wire rows × 132 bytes */
-#define GM168_WIRE_ROWS        80
-#define GM168_WIRE_ROW_STRIDE  132     /* bytes per wire row */
-#define GM168_WIRE_ROW_DATA    96      /* non-zero bytes per wire row */
-#define GM168_FRAME_W          80      /* final image width */
-#define GM168_FRAME_H          64      /* final image height */
-#define GM168_FRAME_PIXELS     (GM168_FRAME_W * GM168_FRAME_H)
-#define GM168_IMAGE_SCALE      2
-#define GM168_OUTPUT_W         (GM168_FRAME_W * GM168_IMAGE_SCALE)
-#define GM168_OUTPUT_H         (GM168_FRAME_H * GM168_IMAGE_SCALE)
-#define GM168_FRAME_BYTES      (GM168_FRAME_PIXELS * 2)
+/* Wire-layout constants and gm168_decode_frame() live in
+ * gm168_frame_layout.h so unit tests exercise the production transform. */
 /* Number of dark frames averaged at init to suppress temporal noise. The
  * single-frame BG used previously produced std ~60 in the final image; with
  * N=5 averaging std rises closer to the Windows-preprocessor reference (91). */
@@ -274,6 +265,8 @@ struct SsmData {
 #define GM168_SIGFM_THRESHOLD        8
 #define GM168_SIGFM_DUP_THRESHOLD    15
 #define GM168_SIGFM_VERIFY_RETRIES   2
+#define GM168_SIGFM_MIN_KEYPOINTS    30
+#define GM168_SIGFM_MIN_COVERAGE     0.55
 #define GM168_NR_ENROLL_STAGES       20
 #define GM168_CALIB_BLOB_SIZE       0x224b0
 #define GM168_CALIB_PLANE_WORDS     7040
@@ -1444,37 +1437,6 @@ gm168_envelope_stretch (const guint16 *raw,
     g_clear_pointer (&fmask, g_free);
 }
 
-static int
-gm168_decode_frame (const guint8 *in, gsize in_len, guint16 *out)
-{
-    if (in_len < (gsize)(GM168_WIRE_ROWS * GM168_WIRE_ROW_STRIDE))
-        return -1;
-
-    guint8 compact[GM168_WIRE_ROWS * GM168_WIRE_ROW_DATA];
-    for (int r = 0; r < GM168_WIRE_ROWS; r++)
-        memcpy (compact + r * GM168_WIRE_ROW_DATA,
-                in     + r * GM168_WIRE_ROW_STRIDE,
-                GM168_WIRE_ROW_DATA);
-
-    int k = 0;
-    for (int i = 0; i < GM168_WIRE_ROWS * GM168_WIRE_ROW_DATA; i += 6) {
-        guint8 b0 = compact[i+0], b1 = compact[i+1], b2 = compact[i+2];
-        guint8 b3 = compact[i+3], b4 = compact[i+4], b5 = compact[i+5];
-        guint16 pix[4] = {
-            ((b0 & 0x0F) << 8) | b1,
-            (b3 << 4)          | (b0 >> 4),
-            ((b5 & 0x0F) << 8) | b2,
-            (b4 << 4)          | (b5 >> 4),
-        };
-        for (int j = 0; j < 4; j++)
-            out[((k + j) % GM168_FRAME_H) * GM168_FRAME_W
-              + ((k + j) / GM168_FRAME_H)] = pix[j];
-        k += 4;
-    }
-    return 0;
-}
-
-
 
 // --- ASYNC COMMAND HELPERS ---
 
@@ -2390,6 +2352,25 @@ gm168_env_int (const char *name, gint def_val, gint min_val, gint max_val)
             val >= min_val && val <= max_val)
             return (gint) val;
         fp_warn ("goodix-gm168: ignoring invalid %s='%s' (using %d)",
+                 name, env, def_val);
+    }
+    return def_val;
+}
+
+static gdouble
+gm168_env_double (const char *name, gdouble def_val,
+                  gdouble min_val, gdouble max_val)
+{
+    const char *env = g_getenv (name);
+
+    if (env && env[0] != '\0') {
+        char *end = NULL;
+        errno = 0;
+        gdouble val = g_ascii_strtod (env, &end);
+        if (errno == 0 && end != env && *end == '\0' && isfinite (val) &&
+            val >= min_val && val <= max_val)
+            return val;
+        fp_warn ("goodix-gm168: ignoring invalid %s='%s' (using %.3f)",
                  name, env, def_val);
     }
     return def_val;
@@ -4606,6 +4587,14 @@ static void dev_open (FpImageDevice *dev)
     fpi_image_device_set_sigfm_verify_retries (dev, verify_retries);
     fp_dbg ("goodix-gm168: SIGFM verify retries = %d", verify_retries);
 
+    gint min_keypoints = gm168_env_int ("GM168_SIGFM_MIN_KEYPOINTS",
+                                        GM168_SIGFM_MIN_KEYPOINTS, 0, 1000);
+    gdouble min_coverage = gm168_env_double ("GM168_SIGFM_MIN_COVERAGE",
+                                             GM168_SIGFM_MIN_COVERAGE, 0.0, 1.0);
+    fpi_image_device_set_sigfm_quality_gate (dev, min_keypoints, min_coverage);
+    fp_dbg ("goodix-gm168: SIGFM quality gate = %d keypoints, coverage %.3f",
+            min_keypoints, min_coverage);
+
     fp_dbg ("goodix-gm168: latency tuning: wait_lift_poll=%dms capture_settle=%dms",
             gm168_wait_lift_poll_ms (), gm168_capture_settle_ms ());
 
@@ -4695,6 +4684,8 @@ static void fpi_device_goodix_gm168_class_init (FpDeviceGoodixGm168Class *klass)
   img_class->algorithm = FPI_PRINT_SIGFM;
   img_class->bz3_threshold = GM168_SIGFM_THRESHOLD;
   img_class->sigfm_dup_threshold = GM168_SIGFM_DUP_THRESHOLD;
+  img_class->sigfm_min_keypoints = GM168_SIGFM_MIN_KEYPOINTS;
+  img_class->sigfm_min_coverage = GM168_SIGFM_MIN_COVERAGE;
   img_class->img_width = GM168_OUTPUT_W;
   img_class->img_height = GM168_OUTPUT_H;
 }

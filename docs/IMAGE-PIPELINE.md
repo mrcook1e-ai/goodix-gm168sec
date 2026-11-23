@@ -36,6 +36,7 @@ flowchart LR
     QMET --> SCALE["gm168_resize_2x()<br/>Bilinear 80x64 -> 160x128 (ppmm=39.37)"]
     SCALE --> QGATE["Quality Gate + Dual Capture<br/>(<=6 attempts / 600ms, 2 frames/touch)"]
     QGATE --> LIBFPRINT["fpi_image_device_image_captured(FpImage)"]
+    LIBFPRINT --> SIGFM_QG["Normalized-frame SIGFM quality gate<br/>30 keypoints + 55% active 8x8 tiles<br/>(verify coverage only after no-match)"]
 ```
 
 ## 10564-Byte Wire Frame Format and Unpacking
@@ -44,7 +45,7 @@ flowchart LR
 
 `goodix_gm168_decode_img()` scans up to the first `32` bytes of the `B2` inner payload (`[B2][inner_len_L][inner_len_H][hdrsum][sub-header...][TLS]`) for the TLS Application Data record header `0x17 0x03 0x03` (falling back to offset `+13` if absent) and feeds the TLS ciphertext into `goodix_gm168_tls_feed()`.
 
-### `10564`-Byte Plaintext Layout (`gm168_decode_frame`)
+### `10564`-Byte Plaintext Layout (`driver/gm168_frame_layout.h`)
 
 Once `self->img_len >= GM168_TLS_FRAME_SIZE` (`10564` bytes):
 
@@ -64,7 +65,9 @@ P2 = ((b5 & 0x0F) << 8) | b2
 P3 = (b4 << 4)          | (b5 >> 4)
 ```
 
-Logical pixel `k` (`0..5119`) is written to `out[(k % 64) * 80 + (k / 64)]`, transposing the `80x64` wire stream inline into a row-major **`64` rows × `80` columns** (`GM168_FRAME_W = 80`, `GM168_FRAME_H = 64`) `guint16` array.
+Logical pixel `k` (`0..5119`) is written through `gm168_stream_to_image_index(k)` to `out[(k % 64) * 80 + (k / 64)]`, transposing the `80x64` wire stream inline into a row-major **`64` rows × `80` columns** (`GM168_FRAME_W = 80`, `GM168_FRAME_H = 64`) `guint16` array.
+
+`goodix-gm168-frame-layout` executes this exact production inline decoder on a synthetic packed `10564`-byte buffer. It verifies the bijective stream-to-image mapping for all `5120` pixels, known 12-bit packing round-trips, non-zero padding/trailer exclusion, short-input rejection, and null-pointer guards. This is offline layout proof, not new live sensor validation.
 
 ## Dynamic Background Capture and Sanity Gate
 
@@ -134,6 +137,10 @@ To avoid submitting smudged landing frames or timing out on held touches, `captu
    - Once the first quality-accepted frame (`dual_pending_img`) is obtained, the driver immediately triggers a **second** `SCAN_TRIG` (`start_capture_ssm()`) **without** an intermediate `REARM` (mirroring observed Windows capture behavior while the finger stays settled).
    - When frame #2 finishes, `capture_completed()` picks whichever of `#1` or `#2` has the higher `quality` score and submits it via `start_rearm_ssm()`.
    - **Error fallback**: if a subsequent retry or dual frame #2 fails with a recoverable capture error while `best_img` or `dual_pending_img` already holds a viable frame, the candidate with the higher quality is submitted and the other is released. `FP_DEVICE_ERROR_REMOVED` and cancellation never use this fallback.
+
+## SIGFM Feature-Quality Gate
+
+After the `160x128` frame reaches libfprint, the normalized pixels are also measured by `sigfm_image_coverage()`. This second gate is spatial rather than a single central score: complete `8x8` tiles outside a `2 px` border count as active at grey-level standard deviation `>= 25`. GM168 requires `30` keypoints and `0.55` coverage for enrollment; verify applies the coverage condition only to a no-match. See [`SIGFM.md`](SIGFM.md) for retry semantics and the provisional validation boundary.
 
 ## Diagnostic Frame Dumps (`GM168_DUMP_FRAMES`)
 

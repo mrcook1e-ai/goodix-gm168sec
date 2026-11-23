@@ -212,6 +212,17 @@ Any other status byte fails the SSM immediately (`FP_DEVICE_ERROR_PROTO`).
   - `gm168_classify_usb_error()` categorizes `GError` into `OTHER`, `CANCELLED`, `TIMEOUT`, `NO_DEVICE`, and `IO`.
   - `gm168_handle_fatal_usb_error()` consumes `NO_DEVICE` across all SSM USB callbacks, sets `self->device_dead = TRUE`, and emits `FP_DEVICE_ERROR_REMOVED`. Action/transfer guards read `device_dead` to suppress new polling, commands, rearm, and recovery; a later activation cannot reuse the stale TLS fast path after removal.
 
+### SIGFM Deferred Deactivation Barrier
+
+The `FpImageDevice` core adds a lifecycle barrier around the existing GM168 USB state machines:
+
+- A non-cancelling `fpi_image_device_deactivate()` call made while `finger_present` or `minutiae_scan_active` (including SIGFM extraction) is true sets `action_pending_deactivation` and returns without entering the driver's `DEINIT` SSM.
+- The finger-off path and the extraction-completion callback retry the pending request. `DEINIT` starts only when both conditions are false, and the public action completes after normal deactivation completion.
+- Final enrollment can therefore report its last stage without deactivating underneath an active frame callback; identify/verify can finish matching before teardown.
+- Cancellation uses `cancelling = TRUE`, clears the pending flag, and immediately follows the normal generation/cancellation path. USB removal and fatal errors are never delayed by this barrier.
+
+The GM168 driver still performs its own `REARM`/lift-wait before submitting frames. The core barrier is defence in depth for core/driver ordering, not a replacement for `wait_lift_cb()`, `gm168_ssm_is_current()`, or `io_cancellable`.
+
 ### Timing and Deadline Contract (`driver/gm168_timeouts.h`)
 
 | Constant | Value | Role |

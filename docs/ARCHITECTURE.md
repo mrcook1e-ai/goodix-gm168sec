@@ -53,12 +53,12 @@ flowchart TB
 
 | Component | Source Files | Responsibility | External Dependencies |
 |---|---|---|---|
-| **Driver Core** | `driver/goodix_gm168.c` | `FpImageDevice` lifecycle, `INIT`/`CAP`/`REARM`/`RECOVER`/`DEINIT` SSMs, polling, frame decoding, preprocessing, quality gate, dual capture, state file loading | GLib, `GUsb`, `FpiSsm`, OpenSSL `OPENSSL_cleanse`/`CRYPTO_memcmp` |
+| **Driver Core** | `driver/goodix_gm168.c`, `driver/gm168_frame_layout.h` | `FpImageDevice` lifecycle, `INIT`/`CAP`/`REARM`/`RECOVER`/`DEINIT` SSMs, polling, packed frame decoding/layout, preprocessing, quality gate, dual capture, state file loading | GLib, `GUsb`, `FpiSsm`, OpenSSL `OPENSSL_cleanse`/`CRYPTO_memcmp` |
 | **Protocol Codec** | `driver/goodix_proto.c`, `driver/goodix_proto.h` | `0xA0`/`0xB0`/`0xB2` packet encode/decode, header & body checksums, touch packet matcher, static Windows-captured register/FDT payloads, runtime `goodix_gm168_psk[32]` buffer | GLib |
 | **TLS Adapter** | `driver/goodix_tls.c`, `driver/goodix_tls.h` | OpenSSL 3 TLS 1.2 server (`PSK-AES128-CBC-SHA256`), `AF_UNIX` `socketpair` bridge, handshake thread, `GMainContext` completion source | OpenSSL 3 (`>= 3.0, < 4.0`), POSIX sockets, `pthread` |
 | **PSK Recovery** | `driver/gm168_psk_recovery.c`, `driver/gm168_psk_recovery.h` | Pure buffer-only DPAPI v1 total-length parser, `0xbb010003` TLV validator, `SecWhiteEncrypt` root/IV/AES-128-CBC/HMAC-SHA256 decrypt, `0xE4` reply validators | OpenSSL 3 (`EVP`, `HMAC`, `CRYPTO_memcmp`, `OPENSSL_cleanse`), GLib |
 | **Support Headers** | `driver/gm168_timeouts.h`, `driver/gm168_usb_errors.h`, `driver/gm168_trace.h`, `driver/gm168_log.{c,h}` | Compile-time-asserted timing/deadline constants, USB error classification, opt-in `[TRACE]` measurements, opt-in `$GM168_LOG_DIR` session text logs | GLib, `GUsb` |
-| **SIGFM Subsystem** | `patches/libfprint-v1.94.100-integration.patch` (`libfprint/sigfm/*`, `fpi-image.c`, `fpi-print.c`, `fp-print.c`, `fpi-image-device.c`) | SIFT keypoint extraction, Lowe ratio + RANSAC partial-affine verification, `SGFM` v1 serialization, `FP3` integration, enroll anti-dup, verify auto-retry | OpenCV 4 (`core`, `features2d`, `calib3d`), GLib `GTask` |
+| **SIGFM Subsystem** | `patches/libfprint-v1.94.100-integration.patch` (`libfprint/sigfm/*`, `fpi-image.c`, `fpi-print.c`, `fp-print.c`, `fpi-image-device.c`) | SIFT keypoint extraction, tiled coverage, reciprocal Lowe filtering + RANSAC partial-affine verification, deferred deactivation, `SGFM` v1 serialization, `FP3` integration, enroll anti-dup, verify auto-retry | OpenCV 4 (`core`, `features2d`, `calib3d`), GLib `GTask` |
 
 ## Activation-to-Verify Data Flow
 
@@ -112,8 +112,9 @@ sequenceDiagram
     Drv->>Drv: Decode 80x64 12-bit -> preprocess -> 2x resize (160x128) -> pick best
     Drv->>Usb: REARM (0x34 x2 -> 150ms -> 0xAE -> 0x32 -> wait_lift)
     Drv->>Core: report_finger_status(FALSE) + fpi_image_device_image_captured(FpImage)
-    Core->>Core: GTask worker: normalize flags + sigfm_extract()
-    Core->>Core: Match (threshold >= 8) or enroll anti-dup check
+    Core->>Core: GTask worker: normalize flags + sigfm_extract() + coverage
+    Core->>Core: Quality gate + reciprocal/RANSAC match (threshold >= 8)<br/>or enroll anti-dup check
+    Core->>Core: Defer teardown until finger-off + extraction completion
 ```
 
 ## Threading and GLib Owner Context
@@ -135,7 +136,7 @@ The driver preserves strict thread confinement around `libfprint`'s single-threa
 
 3. **SIGFM Worker (`GTask`)**:
    - Feature extraction (`fpi_image_extract_sigfm_info()` in `libfprint/fpi-image.c`) validates dimensions and uses an atomic CAS on `self->detection_in_progress` before launching `fpi_image_extract_sigfm_thread_func()` via `g_task_run_in_thread()`.
-   - Image normalization (`H_FLIPPED`, `V_FLIPPED`, `COLORS_INVERTED`) and OpenCV `cv::SIFT::detectAndCompute()` execute on the GLib thread pool and marshal `SigfmImgInfo` back on completion.
+   - Image normalization (`H_FLIPPED`, `V_FLIPPED`, `COLORS_INVERTED`), OpenCV `cv::SIFT::detectAndCompute()`, and tiled coverage measurement execute on the GLib thread pool and marshal `SigfmImgInfo` + coverage back on completion. The core's deferred-deactivation flag prevents normal teardown until this worker has finished.
 
 ## Asynchronous USB Transfer Model
 

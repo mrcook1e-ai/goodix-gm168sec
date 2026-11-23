@@ -5,6 +5,14 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
 ## [Unreleased]
 
 ### Added
+- Reciprocal SIGFM descriptor matching with a synthetic many-to-one regression
+  test, plus internal forward-only/translation-consensus A/B controls.
+  Translation consensus remains disabled in production.
+- Normalized-frame SIGFM quality gating (`30` keypoints and `0.55` active `8x8`
+  tile coverage by default) with centered-finger retries and deferred
+  deactivation while finger presence or asynchronous extraction is active.
+- `goodix-gm168-frame-layout` synthetic coverage of the exact production 12-bit
+  unpack/transpose function, including all `5120` mappings and malformed input.
 - Read-only recovery of the existing PSK when `psk.bin` is absent: fresh E4
   hash validation, dynamic DPAPI v1 parsing, exact white-box TLV validation,
   OpenSSL 3 decryption, constant-time hash verification, and in-memory TLS use.
@@ -20,9 +28,10 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   `patches/libfprint-v1.94.100-integration.patch` targeting pinned upstream
   `libfprint v1.94.100` (`80a4b5ec612892c5c056c48dddaa561452cf37ec`).
 - Switched matching from NBIS (`bz3`) to **SIGFM** (`FPI_PRINT_SIGFM`, OpenCV
-  SIFT + RANSAC affine verification), with 2x bilinear output scaling to
-  `160x128`, 20 enrollment stages, enrollment duplicate rejection, and bounded
-  verify auto-retry.
+  SIFT + reciprocal matching + RANSAC affine verification), with 2x bilinear
+  output scaling to `160x128`, 20 enrollment stages, enrollment duplicate
+  rejection, and bounded verify auto-retry. The versioned `SGFM v1` template
+  format remains compatible and unchanged.
 - Updated protocol ACK handling to accept `GOODIX_GM168_STATUS_MORE` (`0x03`)
   for `GFUSB_GM168SEC_APP_10036` firmware, and validated dynamic 5-frame dark
   background capture/fallback without requiring calibration files.
@@ -52,9 +61,14 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   base subobject, and obsolete framing/CLAHE code was removed.
 
 ### Validation
-- Offline targeted/full suites passed (`7 OK`, `34` disabled-driver skips), the
-  standalone timeout contract passed, and both direct and Meson Valgrind runs
-  completed with no errors or lost blocks.
+- Offline targeted/full suites for the revised matcher passed (`8 OK`, `34`
+  disabled-driver/data skips), including the new frame-layout target; a clean
+  pinned-checkout overlay rebuild passed all four targeted suites, the standalone
+  timeout contract passed, and current direct/Meson Valgrind runs completed with
+  zero errors and zero definitely/indirectly/possibly lost blocks.
+- The reciprocal/quality/deferred-deactivation revision has **not** received a
+  post-change live hardware run. Its current evidence is synthetic only;
+  translation consensus has only an opt-in synthetic A/B path and stays off.
 - Live APP 10036 smoke testing completed cold INIT/TLS/BG and `12` successful
   enroll stages across `15` touches before a `G_IO_ERROR_CANCELLED` stop. No
   TLS, background, REARM/RECOVER, or watchdog failure was observed; median
@@ -63,7 +77,9 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
 
 ### Known limitations
 - Tested only on limited `27c6:589a` hardware (`GFUSB_GM168SEC_APP_10036`) with
-  a small FAR/FRR sample set.
+  a small FAR/FRR sample set. Revised reciprocal/quality/lifecycle behavior and
+  the provisional `30`/`0.55` capture gate still need same-frame live A/B
+  validation; no new accuracy claim is made.
 - PSK recovery is validated only for the existing-key APP 10036 layout; it does
   not provision a new key and does not provide automatic persistent storage.
 - Suspend/resume, USB hotplug, and alternative firmware variants remain

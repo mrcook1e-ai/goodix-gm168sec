@@ -1,8 +1,8 @@
 diff --git a/libfprint/fp-image-device-private.h b/libfprint/fp-image-device-private.h
-index b075634..52946c0 100644
+index b075634..589e22c 100644
 --- a/libfprint/fp-image-device-private.h
 +++ b/libfprint/fp-image-device-private.h
-@@ -37,9 +37,20 @@ typedef struct
+@@ -37,9 +37,27 @@ typedef struct
    FpImage            *capture_image;
  
    gint                bz3_threshold;
@@ -12,6 +12,9 @@ index b075634..52946c0 100644
 +  gint                sigfm_verify_retries;
 +  gint                verify_retry_count;
 +  gboolean            verify_retry_pending;
++  gboolean            action_pending_deactivation;
++  gint                sigfm_min_keypoints;
++  gdouble             sigfm_min_coverage;
  } FpImageDevicePrivate;
  
  
@@ -23,8 +26,12 @@ index b075634..52946c0 100644
 +                                                FpPrint        *result,
 +                                                FpPrint       **print,
 +                                                GError        **error);
++gboolean fpi_image_device_check_sigfm_quality   (FpImageDevice  *self,
++                                                FpImage        *image,
++                                                gboolean        require_coverage,
++                                                GError        **error);
 diff --git a/libfprint/fp-image-device.c b/libfprint/fp-image-device.c
-index ac88ffd..9dc67ff 100644
+index ac88ffd..a7c86cd 100644
 --- a/libfprint/fp-image-device.c
 +++ b/libfprint/fp-image-device.c
 @@ -20,6 +20,7 @@
@@ -35,16 +42,17 @@ index ac88ffd..9dc67ff 100644
  #include "fp-image-device-private.h"
  
  #define BOZORTH3_DEFAULT_THRESHOLD 40
-@@ -75,6 +76,8 @@ fp_image_device_close (FpDevice *device)
+@@ -75,6 +76,9 @@ fp_image_device_close (FpDevice *device)
    FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
  
    g_assert (priv->active == FALSE);
 +  priv->verify_retry_count = 0;
 +  priv->verify_retry_pending = FALSE;
++  priv->action_pending_deactivation = FALSE;
    cls->img_close (self);
  }
  
-@@ -82,9 +85,12 @@ static void
+@@ -82,9 +86,13 @@ static void
  fp_image_device_cancel_action (FpDevice *device)
  {
    FpImageDevice *self = FP_IMAGE_DEVICE (device);
@@ -54,10 +62,11 @@ index ac88ffd..9dc67ff 100644
    action = fpi_device_get_current_action (device);
 +  priv->verify_retry_count = 0;
 +  priv->verify_retry_pending = FALSE;
++  priv->action_pending_deactivation = FALSE;
  
    /* We can only cancel capture operations, in that case, deactivate and return
     * an error immediately. */
-@@ -125,11 +131,49 @@ fp_image_device_start_capture_action (FpDevice *device)
+@@ -125,11 +133,50 @@ fp_image_device_start_capture_action (FpDevice *device)
  
        fpi_device_get_enroll_data (device, &enroll_print);
        g_object_get (enroll_print, "fpi-type", &print_type, NULL);
@@ -97,6 +106,7 @@ index ac88ffd..9dc67ff 100644
  
    priv->enroll_stage = 0;
 +  priv->enroll_dup_rejects = 0;
++  priv->action_pending_deactivation = FALSE;
 +  if (action == FPI_DEVICE_ACTION_IDENTIFY && priv->verify_retry_pending)
 +    {
 +      priv->verify_retry_pending = FALSE;
@@ -109,7 +119,7 @@ index ac88ffd..9dc67ff 100644
    /* The internal state machine guarantees both of these. */
    g_assert (!priv->finger_present);
    g_assert (!priv->minutiae_scan_active);
-@@ -192,12 +236,33 @@ fp_image_device_constructed (GObject *obj)
+@@ -192,12 +239,40 @@ fp_image_device_constructed (GObject *obj)
    FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
    FpImageDeviceClass *cls = FP_IMAGE_DEVICE_GET_CLASS (self);
  
@@ -124,12 +134,19 @@ index ac88ffd..9dc67ff 100644
 +  priv->sigfm_verify_retries = 0;
 +  priv->verify_retry_count = 0;
 +  priv->verify_retry_pending = FALSE;
++  priv->action_pending_deactivation = FALSE;
++  priv->sigfm_min_keypoints = 1;
++  priv->sigfm_min_coverage = 0.0;
    G_OBJECT_CLASS (fp_image_device_parent_class)->constructed (obj);
 +
 +  if (cls->sigfm_dup_threshold > 0)
 +    priv->sigfm_dup_threshold = cls->sigfm_dup_threshold;
 +  if (cls->sigfm_verify_retries > 0)
 +    priv->sigfm_verify_retries = cls->sigfm_verify_retries;
++  if (cls->sigfm_min_keypoints > 0)
++    priv->sigfm_min_keypoints = cls->sigfm_min_keypoints;
++  if (cls->sigfm_min_coverage > 0.0)
++    priv->sigfm_min_coverage = cls->sigfm_min_coverage;
 +
 +  if (cls->algorithm != FPI_PRINT_UNDEFINED)
 +    {
@@ -506,20 +523,25 @@ index 9500b3a..1be9a24 100644
                                               (GEqualFunc) fp_print_equal, NULL))
          {
 diff --git a/libfprint/fpi-image-device.c b/libfprint/fpi-image-device.c
-index 87bdc60..539bf2f 100644
+index 87bdc60..5a9e2d5 100644
 --- a/libfprint/fpi-image-device.c
 +++ b/libfprint/fpi-image-device.c
-@@ -22,6 +22,9 @@
+@@ -22,6 +22,14 @@
  
  #include "fp-image-device-private.h"
  #include "fp-image-device.h"
 +#include "fpi-image.h"
 +
++#include <config.h>
++#if defined(HAVE_SIGFM) && HAVE_SIGFM
++#include "sigfm/sigfm.hpp"
++#endif
++
 +#define SIGFM_MAX_CONSECUTIVE_DUP_REJECTS 6
  
  /**
   * SECTION: fpi-image-device
-@@ -46,6 +49,16 @@ static void fp_image_device_change_state (FpImageDevice      *self,
+@@ -46,6 +54,16 @@ static void fp_image_device_change_state (FpImageDevice      *self,
  
  /* Private shared functions */
  
@@ -536,7 +558,46 @@ index 87bdc60..539bf2f 100644
  void
  fpi_image_device_activate (FpImageDevice *self)
  {
-@@ -209,6 +222,11 @@ fp_image_device_maybe_complete_action (FpImageDevice *self, GError *error)
+@@ -73,14 +91,38 @@ fpi_image_device_deactivate (FpImageDevice *self, gboolean cancelling)
+       fp_dbg ("Already deactivated, ignoring request.");
+       return;
+     }
++  if (!cancelling && (priv->finger_present || priv->minutiae_scan_active))
++    {
++      priv->action_pending_deactivation = TRUE;
++      fp_dbg ("Deferring image device deactivation until finger-off and feature extraction completion");
++      return;
++    }
++
+   if (!cancelling && priv->state != FPI_IMAGE_DEVICE_STATE_IDLE)
+     g_warning ("Deactivating image device while it is not idle, this should not happen.");
+ 
+   fp_dbg ("Deactivating image device");
++  priv->action_pending_deactivation = FALSE;
+   fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_DEACTIVATING);
+   cls->deactivate (self);
+ }
+ 
++/* Complete a previously requested non-cancelling deactivation only when both
++ * the finger and asynchronous feature extraction have quiesced. */
++static void
++fp_image_device_maybe_deactivate (FpImageDevice *self)
++{
++  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
++
++  if (!priv->action_pending_deactivation || !priv->active ||
++      priv->finger_present || priv->minutiae_scan_active ||
++      priv->state == FPI_IMAGE_DEVICE_STATE_DEACTIVATING ||
++      priv->state == FPI_IMAGE_DEVICE_STATE_INACTIVE)
++    return;
++
++  fpi_image_device_deactivate (self, FALSE);
++}
++
+ /* Static helper functions */
+ 
+ /* This should not be called directly to activate/deactivate the device! */
+@@ -209,6 +251,11 @@ fp_image_device_maybe_complete_action (FpImageDevice *self, GError *error)
  
    if (priv->action_error)
      {
@@ -548,10 +609,57 @@ index 87bdc60..539bf2f 100644
        fpi_device_action_error (device, g_steal_pointer (&priv->action_error));
        g_clear_object (&priv->capture_image);
        return;
-@@ -238,6 +256,48 @@ fp_image_device_maybe_complete_action (FpImageDevice *self, GError *error)
+@@ -238,6 +285,95 @@ fp_image_device_maybe_complete_action (FpImageDevice *self, GError *error)
      }
  }
  
++/* Return TRUE when the frame satisfies the driver-specific SIGFM capture
++ * policy. Coverage can be evaluated after a failed verify match so a genuine
++ * low-coverage match is never discarded. */
++gboolean
++fpi_image_device_check_sigfm_quality (FpImageDevice *self,
++                                     FpImage       *image,
++                                     gboolean       require_coverage,
++                                     GError       **error)
++{
++  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
++
++  g_return_val_if_fail (FP_IS_IMAGE_DEVICE (self), FALSE);
++  g_return_val_if_fail (FP_IS_IMAGE (image), FALSE);
++  g_return_val_if_fail (error == NULL || *error == NULL, FALSE);
++
++  if (priv->algorithm != FPI_PRINT_SIGFM)
++    return TRUE;
++
++#if defined(HAVE_SIGFM) && HAVE_SIGFM
++  {
++    SigfmImgInfo *info = fpi_image_get_sigfm_info (image);
++    gint keypoints = sigfm_keypoints_count (info);
++    gdouble coverage = fpi_image_get_sigfm_coverage (image);
++
++    fp_dbg ("SIGFM quality: keypoints=%d/%d coverage=%.3f/%.3f",
++            keypoints, priv->sigfm_min_keypoints,
++            coverage, priv->sigfm_min_coverage);
++
++    if (keypoints < priv->sigfm_min_keypoints)
++      {
++        g_set_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER,
++                     "Too little fingerprint detail, please place your finger over the sensor");
++        return FALSE;
++      }
++
++    if (require_coverage && coverage < priv->sigfm_min_coverage)
++      {
++        g_set_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER,
++                     "Partial fingerprint coverage, please center your finger on the sensor");
++        return FALSE;
++      }
++  }
++#endif
++
++  return TRUE;
++}
++
 +/* SIGFM verify/identify auto-retry on no-match (NBIS & other drivers stay at 0).
 + * Note on FAR: allowing N retries (e.g. N=2 -> up to 3 touches per session)
 + * gives an impostor 3 attempts instead of 1; with GM168 SIGFM background
@@ -597,7 +705,7 @@ index 87bdc60..539bf2f 100644
  static void
  fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, gpointer user_data)
  {
-@@ -249,11 +309,18 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+@@ -249,11 +385,18 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
    FpImageDevicePrivate *priv;
    FpiDeviceAction action;
  
@@ -617,7 +725,7 @@ index 87bdc60..539bf2f 100644
      {
        /* Cancel operation . */
        if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
-@@ -263,11 +330,21 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+@@ -263,26 +406,42 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
            return;
          }
  
@@ -641,7 +749,20 @@ index 87bdc60..539bf2f 100644
      }
  
    action = fpi_device_get_current_action (device);
-@@ -282,7 +359,7 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+ 
++  if (!error && priv->algorithm == FPI_PRINT_SIGFM)
++    fpi_image_device_check_sigfm_quality (self, image,
++                                          action != FPI_DEVICE_ACTION_IDENTIFY,
++                                          &error);
++
+   if (action == FPI_DEVICE_ACTION_CAPTURE)
+     {
+       priv->capture_image = g_steal_pointer (&image);
+       fp_image_device_maybe_complete_action (self, g_steal_pointer (&error));
++      fp_image_device_maybe_deactivate (self);
+       return;
+     }
+ 
    if (!error)
      {
        print = fp_print_new (device);
@@ -650,7 +771,7 @@ index 87bdc60..539bf2f 100644
        if (!fpi_print_add_from_image (print, image, &error))
          {
            g_clear_object (&print);
-@@ -302,6 +379,52 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+@@ -302,6 +461,52 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
        FpPrint *enroll_print;
        fpi_device_get_enroll_data (device, &enroll_print);
  
@@ -703,7 +824,7 @@ index 87bdc60..539bf2f 100644
        if (print)
          {
            fpi_print_add_print (enroll_print, print);
-@@ -332,14 +455,22 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+@@ -332,14 +537,25 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
        for (i = 0; !error && i < templates->len; i++)
          {
            FpPrint *template = g_ptr_array_index (templates, i);
@@ -722,12 +843,24 @@ index 87bdc60..539bf2f 100644
              }
          }
  
++      if (!error && result == NULL && priv->algorithm == FPI_PRINT_SIGFM)
++        fpi_image_device_check_sigfm_quality (self, image, TRUE, &error);
++
 +      fpi_image_device_apply_sigfm_verify_retry (self, result, &print, &error);
 +
        if (!error || error->domain == FP_DEVICE_RETRY)
          fpi_device_identify_report (device, result, g_steal_pointer (&print), g_steal_pointer (&error));
  
-@@ -382,6 +513,44 @@ fpi_image_device_set_bz3_threshold (FpImageDevice *self,
+@@ -355,6 +571,8 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
+        *      device again). */
+       g_assert_not_reached ();
+     }
++
++  fp_image_device_maybe_deactivate (self);
+ }
+ 
+ /*********************************************************/
+@@ -382,6 +600,69 @@ fpi_image_device_set_bz3_threshold (FpImageDevice *self,
    priv->bz3_threshold = bz3_threshold;
  }
  
@@ -769,10 +902,46 @@ index 87bdc60..539bf2f 100644
 +  priv->sigfm_verify_retries = sigfm_verify_retries;
 +}
 +
++/**
++ * fpi_image_device_set_sigfm_quality_gate:
++ * @self: a #FpImageDevice imaging fingerprint device
++ * @min_keypoints: minimum SIFT keypoint count (0 disables the count gate)
++ * @min_coverage: minimum ridge-like tile coverage in the range 0..1
++ *
++ * Configure capture-quality retries for SIGFM. Verification still accepts a
++ * successful match from a low-coverage frame; coverage only changes a no-match
++ * into #FP_DEVICE_RETRY_CENTER_FINGER.
++ */
++void
++fpi_image_device_set_sigfm_quality_gate (FpImageDevice *self,
++                                        gint           min_keypoints,
++                                        gdouble        min_coverage)
++{
++  FpImageDevicePrivate *priv = fp_image_device_get_instance_private (self);
++
++  g_return_if_fail (FP_IS_IMAGE_DEVICE (self));
++  g_return_if_fail (min_keypoints >= 0);
++  g_return_if_fail (min_coverage >= 0.0 && min_coverage <= 1.0);
++
++  priv->sigfm_min_keypoints = min_keypoints;
++  priv->sigfm_min_coverage = min_coverage;
++}
++
  /**
   * fpi_image_device_report_finger_status:
   * @self: a #FpImageDevice imaging fingerprint device
-@@ -483,12 +652,22 @@ fpi_image_device_image_captured (FpImageDevice *self, FpImage *image)
+@@ -444,7 +725,9 @@ fpi_image_device_report_finger_status (FpImageDevice *self,
+        */
+       fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_IDLE);
+ 
+-      if (action != FPI_DEVICE_ACTION_ENROLL)
++      if (priv->action_pending_deactivation)
++        fp_image_device_maybe_deactivate (self);
++      else if (action != FPI_DEVICE_ACTION_ENROLL)
+         fpi_image_device_deactivate (self, FALSE);
+       else
+         fp_image_device_enroll_maybe_await_finger_on (self);
+@@ -483,12 +766,22 @@ fpi_image_device_image_captured (FpImageDevice *self, FpImage *image)
  
    priv->minutiae_scan_active = TRUE;
  
@@ -801,7 +970,7 @@ index 87bdc60..539bf2f 100644
  
    /* XXX: This is wrong if we add support for raw capture mode. */
    fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF);
-@@ -530,6 +709,7 @@ fpi_image_device_retry_scan (FpImageDevice *self, FpDeviceRetry retry)
+@@ -530,6 +823,7 @@ fpi_image_device_retry_scan (FpImageDevice *self, FpDeviceRetry retry)
      }
    else if (action == FPI_DEVICE_ACTION_IDENTIFY)
      {
@@ -809,11 +978,19 @@ index 87bdc60..539bf2f 100644
        fpi_device_identify_report (FP_DEVICE (self), NULL, NULL, error);
        fp_image_device_maybe_complete_action (self, NULL);
        fpi_image_device_deactivate (self, TRUE);
+@@ -661,6 +955,7 @@ fpi_image_device_deactivate_complete (FpImageDevice *self, GError *error)
+ 
+   /* Assume finger was removed. */
+   priv->finger_present = FALSE;
++  priv->action_pending_deactivation = FALSE;
+ 
+   fp_image_device_change_state (self, FPI_IMAGE_DEVICE_STATE_INACTIVE);
+ 
 diff --git a/libfprint/fpi-image-device.h b/libfprint/fpi-image-device.h
-index 71472db..31e165c 100644
+index 71472db..10cde95 100644
 --- a/libfprint/fpi-image-device.h
 +++ b/libfprint/fpi-image-device.h
-@@ -72,9 +72,12 @@ typedef enum {
+@@ -72,9 +72,14 @@ typedef enum {
  
  /**
   * FpImageDeviceClass:
@@ -824,20 +1001,24 @@ index 71472db..31e165c 100644
 + * @algorithm: Matching algorithm (#FPI_PRINT_NBIS by default, or #FPI_PRINT_SIGFM)
 + * @sigfm_dup_threshold: Optional SIGFM enroll anti-duplicate threshold (0 = disabled)
 + * @sigfm_verify_retries: Optional SIGFM verify/identify auto-retry count on no-match (0 = disabled)
++ * @sigfm_min_keypoints: Minimum SIFT keypoints before a scan is matchable (0 = safe default of 1)
++ * @sigfm_min_coverage: Minimum ridge-like tile coverage (0 = disabled)
   * @img_open: Open the device and do basic initialization
   *   (use this instead of the #FpDeviceClass open vfunc)
   * @img_close: Close the device
-@@ -107,6 +110,9 @@ struct _FpImageDeviceClass
+@@ -107,6 +112,11 @@ struct _FpImageDeviceClass
    gint          bz3_threshold;
    gint          img_width;
    gint          img_height;
 +  FpiPrintType  algorithm;
 +  gint          sigfm_dup_threshold;
 +  gint          sigfm_verify_retries;
++  gint          sigfm_min_keypoints;
++  gdouble       sigfm_min_coverage;
  
    void          (*img_open)     (FpImageDevice *dev);
    void          (*img_close)    (FpImageDevice *dev);
-@@ -118,6 +124,10 @@ struct _FpImageDeviceClass
+@@ -118,6 +128,13 @@ struct _FpImageDeviceClass
  
  void fpi_image_device_set_bz3_threshold (FpImageDevice *self,
                                           gint           bz3_threshold);
@@ -845,11 +1026,14 @@ index 71472db..31e165c 100644
 +                                               gint           sigfm_dup_threshold);
 +void fpi_image_device_set_sigfm_verify_retries (FpImageDevice *self,
 +                                                gint           sigfm_verify_retries);
++void fpi_image_device_set_sigfm_quality_gate (FpImageDevice *self,
++                                              gint           min_keypoints,
++                                              gdouble        min_coverage);
  
  void fpi_image_device_session_error (FpImageDevice *self,
                                       GError        *error);
 diff --git a/libfprint/fpi-image.c b/libfprint/fpi-image.c
-index 98f412a..a81d0ca 100644
+index 98f412a..ba0aeee 100644
 --- a/libfprint/fpi-image.c
 +++ b/libfprint/fpi-image.c
 @@ -25,6 +25,9 @@
@@ -862,7 +1046,7 @@ index 98f412a..a81d0ca 100644
  
  #ifdef HAVE_PIXMAN
  #include <pixman.h>
-@@ -152,3 +155,298 @@ fpi_image_resize (FpImage *orig_img,
+@@ -152,3 +155,315 @@ fpi_image_resize (FpImage *orig_img,
    return g_object_ref (orig_img);
  #endif
  }
@@ -915,6 +1099,7 @@ index 98f412a..a81d0ca 100644
 +typedef struct
 +{
 +  SigfmImgInfo  *sigfm_info;
++  gdouble        sigfm_coverage;
 +  FpiImageFlags  flags;
 +  unsigned char *image;
 +  gboolean       image_changed;
@@ -954,6 +1139,7 @@ index 98f412a..a81d0ca 100644
 +
 +      g_clear_pointer (&self->sigfm_info, sigfm_free_info);
 +      self->sigfm_info = g_steal_pointer (&data->sigfm_info);
++      self->sigfm_coverage = data->sigfm_coverage;
 +
 +      return TRUE;
 +    }
@@ -1013,6 +1199,8 @@ index 98f412a..a81d0ca 100644
 +
 +  timer = g_timer_new ();
 +  ret_data->sigfm_info = sigfm_extract (image, (int) self->width, (int) self->height);
++  ret_data->sigfm_coverage = sigfm_image_coverage (image, (int) self->width,
++                                                    (int) self->height);
 +  g_timer_stop (timer);
 +
 +  if (g_task_return_error_if_cancelled (thread_task))
@@ -1027,16 +1215,12 @@ index 98f412a..a81d0ca 100644
 +    }
 +
 +  n_keypoints = sigfm_keypoints_count (ret_data->sigfm_info);
-+  fp_dbg ("SIGFM extraction completed in %f secs (%d keypoints)",
-+          g_timer_elapsed (timer, NULL), n_keypoints);
++  fp_dbg ("SIGFM extraction completed in %f secs (%d keypoints, coverage %.3f)",
++          g_timer_elapsed (timer, NULL), n_keypoints, ret_data->sigfm_coverage);
 +
-+  if (n_keypoints <= 0)
-+    {
-+      g_task_return_new_error (thread_task, G_IO_ERROR, G_IO_ERROR_FAILED,
-+                               "No SIGFM keypoints found");
-+      return;
-+    }
-+
++  /* Empty feature sets are valid extraction results. FpImageDevice applies the
++   * driver-specific keypoint/coverage policy and turns them into a centered-
++   * finger retry rather than an internal extraction failure. */
 +  g_task_return_pointer (thread_task, g_steal_pointer (&ret_data),
 +                         (GDestroyNotify) fpi_image_extract_sigfm_free);
 +}
@@ -1056,6 +1240,23 @@ index 98f412a..a81d0ca 100644
 +  g_return_val_if_fail (FP_IS_IMAGE (self), NULL);
 +
 +  return self->sigfm_info;
++}
++
++/**
++ * fpi_image_get_sigfm_coverage:
++ * @self: A #FpImage
++ *
++ * Gets the ridge-like tile coverage measured on the normalized image during
++ * SIGFM extraction.
++ *
++ * Returns: coverage in the range 0..1, or 0 if not extracted.
++ */
++gdouble
++fpi_image_get_sigfm_coverage (FpImage *self)
++{
++  g_return_val_if_fail (FP_IS_IMAGE (self), 0.0);
++
++  return self->sigfm_coverage;
 +}
 +
 +/**
@@ -1162,7 +1363,7 @@ index 98f412a..a81d0ca 100644
 +#endif
 +}
 diff --git a/libfprint/fpi-image.h b/libfprint/fpi-image.h
-index fdc376c..f8ec1f4 100644
+index fdc376c..f88ab74 100644
 --- a/libfprint/fpi-image.h
 +++ b/libfprint/fpi-image.h
 @@ -22,6 +22,8 @@
@@ -1174,7 +1375,7 @@ index fdc376c..f8ec1f4 100644
  /**
   * FpiImageFlags:
   * @FPI_IMAGE_V_FLIPPED: the image is vertically flipped
-@@ -65,14 +67,25 @@ struct _FpImage
+@@ -65,14 +67,27 @@ struct _FpImage
    FpiImageFlags flags;
  
    /*< private >*/
@@ -1186,12 +1387,14 @@ index fdc376c..f8ec1f4 100644
 -  GPtrArray *minutiae;
 +  GPtrArray    *minutiae;
 +  SigfmImgInfo *sigfm_info;
++  gdouble       sigfm_coverage;
  
 -  gboolean   detection_in_progress;
 +  gboolean      detection_in_progress;
  };
  
 +SigfmImgInfo *fpi_image_get_sigfm_info          (FpImage *self);
++gdouble       fpi_image_get_sigfm_coverage      (FpImage *self);
 +
 +void          fpi_image_extract_sigfm_info        (FpImage            *self,
 +                                                   GCancellable       *cancellable,
@@ -1753,10 +1956,10 @@ index 0000000..7915d4a
 +endif
 diff --git a/libfprint/sigfm/sigfm.cpp b/libfprint/sigfm/sigfm.cpp
 new file mode 100644
-index 0000000..2b84dfa
+index 0000000..9dee352
 --- /dev/null
 +++ b/libfprint/sigfm/sigfm.cpp
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,550 @@
 +// SIGFM algorithm for libfprint
 +//
 +// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
@@ -1784,6 +1987,7 @@ index 0000000..2b84dfa
 +#include <opencv2/core.hpp>
 +#include <opencv2/features2d.hpp>
 +
++#include <algorithm>
 +#include <cmath>
 +#include <cstddef>
 +#include <cstdint>
@@ -1815,6 +2019,12 @@ index 0000000..2b84dfa
 +constexpr double kMinScale = 0.80;
 +constexpr double kMaxScale = 1.25;
 +constexpr double kMinInlierRatio = 0.40;
++constexpr double kTranslationConsensusRadius = 4.0;
++
++// Capture quality gate: 8x8 non-overlapping tiles, ignoring a 2 px border.
++constexpr int kCoverageTileSize = 8;
++constexpr int kCoverageBorder = 2;
++constexpr double kCoverageTileMinStdDev = 25.0;
 +
 +// Versioned binary format constants
 +constexpr unsigned char kMagic[4] = {'S', 'G', 'F', 'M'};
@@ -2055,6 +2265,45 @@ index 0000000..2b84dfa
 +    }
 +}
 +
++double sigfm_image_coverage(const SigfmPix *pix, int width, int height)
++{
++    if (pix == nullptr || width <= 0 || height <= 0) {
++        return 0.0;
++    }
++
++    int active = 0;
++    int total = 0;
++    for (int ty = kCoverageBorder;
++         ty + kCoverageTileSize <= height - kCoverageBorder;
++         ty += kCoverageTileSize) {
++        for (int tx = kCoverageBorder;
++             tx + kCoverageTileSize <= width - kCoverageBorder;
++             tx += kCoverageTileSize) {
++            std::uint64_t sum = 0;
++            std::uint64_t sum_sq = 0;
++            for (int y = ty; y < ty + kCoverageTileSize; ++y) {
++                for (int x = tx; x < tx + kCoverageTileSize; ++x) {
++                    const std::uint64_t v = pix[static_cast<std::size_t>(y) *
++                                                static_cast<std::size_t>(width) +
++                                                static_cast<std::size_t>(x)];
++                    sum += v;
++                    sum_sq += v * v;
++                }
++            }
++
++            const double n = static_cast<double>(kCoverageTileSize * kCoverageTileSize);
++            const double mean = static_cast<double>(sum) / n;
++            const double variance = static_cast<double>(sum_sq) / n - mean * mean;
++            if (variance >= kCoverageTileMinStdDev * kCoverageTileMinStdDev) {
++                ++active;
++            }
++            ++total;
++        }
++    }
++
++    return total > 0 ? static_cast<double>(active) / static_cast<double>(total) : 0.0;
++}
++
 +SigfmImgInfo *sigfm_extract(const SigfmPix *pix, int width, int height)
 +{
 +    if (pix == nullptr || width <= 0 || height <= 0) {
@@ -2091,9 +2340,14 @@ index 0000000..2b84dfa
 +    }
 +}
 +
-+int sigfm_match_score(SigfmImgInfo *frame, SigfmImgInfo *enrolled)
++int sigfm_match_score_with_flags(SigfmImgInfo *frame, SigfmImgInfo *enrolled,
++                                 unsigned int flags)
 +{
 +    if (frame == nullptr || enrolled == nullptr) {
++        return -1;
++    }
++    if ((flags & ~(static_cast<unsigned int>(SIGFM_MATCH_FLAG_FORWARD_ONLY) |
++                   static_cast<unsigned int>(SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS))) != 0U) {
 +        return -1;
 +    }
 +
@@ -2128,26 +2382,43 @@ index 0000000..2b84dfa
 +        }
 +
 +        auto bfm = cv::BFMatcher::create(cv::NORM_L2);
-+        std::vector<std::vector<cv::DMatch>> knn;
-+        bfm->knnMatch(frame->descriptors, enrolled->descriptors, knn, 2);
++        std::vector<std::vector<cv::DMatch>> forward;
++        std::vector<std::vector<cv::DMatch>> backward;
++        bfm->knnMatch(frame->descriptors, enrolled->descriptors, forward, 2);
++        if ((flags & static_cast<unsigned int>(SIGFM_MATCH_FLAG_FORWARD_ONLY)) == 0U) {
++            bfm->knnMatch(enrolled->descriptors, frame->descriptors, backward, 1);
++        }
 +
 +        std::vector<cv::Point2f> pts1;
 +        std::vector<cv::Point2f> pts2;
-+        pts1.reserve(knn.size());
-+        pts2.reserve(knn.size());
++        pts1.reserve(forward.size());
++        pts2.reserve(forward.size());
 +
-+        for (const auto &pair : knn) {
-+            if (pair.size() == 2 &&
-+                static_cast<double>(pair[0].distance) <
++        for (const auto &pair : forward) {
++            if (pair.size() != 2 ||
++                static_cast<double>(pair[0].distance) >=
 +                    kLoweRatio * static_cast<double>(pair[1].distance)) {
-+                const int q = pair[0].queryIdx;
-+                const int t = pair[0].trainIdx;
-+                if (q >= 0 && static_cast<std::size_t>(q) < frame->keypoints.size() &&
-+                    t >= 0 && static_cast<std::size_t>(t) < enrolled->keypoints.size()) {
-+                    pts1.push_back(frame->keypoints[static_cast<std::size_t>(q)].pt);
-+                    pts2.push_back(enrolled->keypoints[static_cast<std::size_t>(t)].pt);
-+                }
++                continue;
 +            }
++
++            const int q = pair[0].queryIdx;
++            const int t = pair[0].trainIdx;
++            if (q < 0 || static_cast<std::size_t>(q) >= frame->keypoints.size() ||
++                t < 0 || static_cast<std::size_t>(t) >= enrolled->keypoints.size()) {
++                continue;
++            }
++
++            // Mutual nearest neighbours remove ambiguous many-to-one matches.
++            if ((flags & static_cast<unsigned int>(SIGFM_MATCH_FLAG_FORWARD_ONLY)) == 0U &&
++                (backward.size() <= static_cast<std::size_t>(t) ||
++                 backward[static_cast<std::size_t>(t)].size() != 1 ||
++                 backward[static_cast<std::size_t>(t)][0].queryIdx != t ||
++                 backward[static_cast<std::size_t>(t)][0].trainIdx != q)) {
++                continue;
++            }
++
++            pts1.push_back(frame->keypoints[static_cast<std::size_t>(q)].pt);
++            pts2.push_back(enrolled->keypoints[static_cast<std::size_t>(t)].pt);
 +        }
 +
 +        const std::size_t good_count = pts1.size();
@@ -2170,16 +2441,57 @@ index 0000000..2b84dfa
 +            return 0;
 +        }
 +
-+        const double scale = std::hypot(model.at<double>(0, 0), model.at<double>(0, 1));
-+        if (!std::isfinite(scale) || scale < kMinScale || scale > kMaxScale) {
++        const double a00 = model.at<double>(0, 0);
++        const double a01 = model.at<double>(0, 1);
++        const double a10 = model.at<double>(1, 0);
++        const double a11 = model.at<double>(1, 1);
++        const double scale = std::hypot(a00, a01);
++        if (!std::isfinite(scale) || scale < kMinScale || scale > kMaxScale ||
++            !std::isfinite(a10) || !std::isfinite(a11) ||
++            !std::isfinite(model.at<double>(0, 2)) ||
++            !std::isfinite(model.at<double>(1, 2))) {
 +            return 0;
 +        }
 +
-+        const int inliers = cv::countNonZero(inl_mask);
++        int inliers = cv::countNonZero(inl_mask);
 +        const double inlier_ratio =
 +            static_cast<double>(inliers) / static_cast<double>(good_count);
 +        if (inlier_ratio < kMinInlierRatio) {
 +            return 0;
++        }
++
++        if ((flags & static_cast<unsigned int>(SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS)) != 0U) {
++            std::vector<cv::Point2f> translations;
++            translations.reserve(static_cast<std::size_t>(inliers));
++            for (std::size_t i = 0; i < good_count; ++i) {
++                if (inl_mask.at<unsigned char>(static_cast<int>(i)) == 0U) {
++                    continue;
++                }
++                const double projected_x = a00 * pts1[i].x + a01 * pts1[i].y;
++                const double projected_y = a10 * pts1[i].x + a11 * pts1[i].y;
++                translations.emplace_back(
++                    static_cast<float>(pts2[i].x - projected_x),
++                    static_cast<float>(pts2[i].y - projected_y));
++            }
++
++            int consensus = 0;
++            for (const auto &candidate : translations) {
++                int support = 0;
++                for (const auto &other : translations) {
++                    if (std::hypot(candidate.x - other.x, candidate.y - other.y) <=
++                        kTranslationConsensusRadius) {
++                        ++support;
++                    }
++                }
++                consensus = std::max(consensus, support);
++            }
++
++            const double consensus_ratio =
++                static_cast<double>(consensus) / static_cast<double>(good_count);
++            if (consensus_ratio < kMinInlierRatio) {
++                return 0;
++            }
++            inliers = consensus;
 +        }
 +
 +        return inliers;
@@ -2189,16 +2501,21 @@ index 0000000..2b84dfa
 +    }
 +}
 +
++int sigfm_match_score(SigfmImgInfo *frame, SigfmImgInfo *enrolled)
++{
++    return sigfm_match_score_with_flags(frame, enrolled, SIGFM_MATCH_FLAGS_DEFAULT);
++}
++
 +void sigfm_free_info(SigfmImgInfo *info)
 +{
 +    delete info;
 +}
 diff --git a/libfprint/sigfm/sigfm.hpp b/libfprint/sigfm/sigfm.hpp
 new file mode 100644
-index 0000000..8d44ab8
+index 0000000..8b68c28
 --- /dev/null
 +++ b/libfprint/sigfm/sigfm.hpp
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,127 @@
 +// SIGFM algorithm for libfprint
 +//
 +// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
@@ -2252,6 +2569,17 @@ index 0000000..8d44ab8
 +void sigfm_free_info(SigfmImgInfo *info);
 +
 +/**
++ * Experimental matching switches for offline A/B tests. The production
++ * sigfm_match_score() API always uses reciprocal matching and leaves
++ * translation consensus disabled.
++ */
++typedef enum {
++    SIGFM_MATCH_FLAGS_DEFAULT = 0,
++    SIGFM_MATCH_FLAG_FORWARD_ONLY = 1U << 0,
++    SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS = 1U << 1,
++} SigfmMatchFlags;
++
++/**
 + * @brief Score how closely a frame matches another
 + *
 + * @param frame Print to be checked
@@ -2259,6 +2587,23 @@ index 0000000..8d44ab8
 + * @return int Number of geometrically consistent inliers (>= 0), or < 0 on error
 + */
 +int sigfm_match_score(SigfmImgInfo *frame, SigfmImgInfo *enrolled);
++
++/**
++ * @brief A/B-test variant of sigfm_match_score()
++ *
++ * FORWARD_ONLY disables reciprocal matching; TRANSLATION_CONSENSUS adds a
++ * post-RANSAC translation-cluster gate. Unknown flag bits are rejected.
++ */
++int sigfm_match_score_with_flags(SigfmImgInfo *frame, SigfmImgInfo *enrolled,
++                                 unsigned int flags);
++
++/**
++ * @brief Fraction of 8x8 image tiles containing ridge-like contrast
++ *
++ * A two-pixel border is ignored. A tile is active when its grey-level standard
++ * deviation is at least 25. Invalid or too-small inputs return 0.
++ */
++double sigfm_image_coverage(const SigfmPix *pix, int width, int height);
 +
 +/**
 + * @brief Serialize an image info for storage
@@ -2300,10 +2645,10 @@ index 0000000..8d44ab8
 +#endif
 diff --git a/libfprint/sigfm/tests.cpp b/libfprint/sigfm/tests.cpp
 new file mode 100644
-index 0000000..5ddc12e
+index 0000000..9583ee2
 --- /dev/null
 +++ b/libfprint/sigfm/tests.cpp
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,473 @@
 +// SIGFM unit tests (synthetic, no real biometric data)
 +//
 +// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
@@ -2688,6 +3033,94 @@ index 0000000..5ddc12e
 +        cv::setRNGSeed(42);
 +        CHECK(sigfm_match_score(ref.get(), f_half.get()) == 5);
 +    }
++
++    TEST_CASE("reciprocal matching rejects many-to-one ratio candidates")
++    {
++        const std::vector<cv::Point2f> probe_pts = {
++            {10.0F, 10.0F}, {50.0F, 15.0F}, {90.0F, 20.0F},
++            {20.0F, 70.0F}, {80.0F, 75.0F},
++            {5.0F, 5.0F}, {15.0F, 5.0F}, {25.0F, 5.0F}, {35.0F, 5.0F},
++            {45.0F, 5.0F}, {55.0F, 5.0F}, {65.0F, 5.0F}, {75.0F, 5.0F},
++        };
++        const std::vector<cv::Point2f> enrolled_pts = {
++            {17.0F, 5.0F}, {57.0F, 10.0F}, {97.0F, 15.0F},
++            {27.0F, 65.0F}, {87.0F, 70.0F}, {140.0F, 100.0F},
++        };
++        SigfmPtr probe = make_synthetic_features(probe_pts);
++        SigfmPtr enrolled = make_synthetic_features(enrolled_pts);
++        probe->descriptors.setTo(cv::Scalar(0));
++        enrolled->descriptors.setTo(cv::Scalar(0));
++
++        // Five unambiguous one-to-one correspondences.
++        for (int i = 0; i < 5; ++i) {
++            probe->descriptors.at<float>(i, i) = 1.0F;
++            enrolled->descriptors.at<float>(i, i) = 1.0F;
++        }
++
++        // Eight additional probe rows pass the forward ratio test against the
++        // same enrolled row. Only the closest one survives the reverse 1-NN.
++        enrolled->descriptors.at<float>(5, 20) = 1.0F;
++        for (int i = 0; i < 8; ++i) {
++            probe->descriptors.at<float>(5 + i, 20) = 1.0F;
++            probe->descriptors.at<float>(5 + i, 30 + i) = 0.01F * (i + 1);
++        }
++
++        cv::setRNGSeed(42);
++        CHECK(sigfm_match_score_with_flags(
++                  probe.get(), enrolled.get(), SIGFM_MATCH_FLAG_FORWARD_ONLY) == 0);
++        cv::setRNGSeed(42);
++        CHECK(sigfm_match_score(probe.get(), enrolled.get()) == 5);
++    }
++
++    TEST_CASE("frame coverage tiles and contrast boundary")
++    {
++        CHECK(sigfm_image_coverage(nullptr, 80, 64) == 0.0);
++        cv::Mat too_small(4, 4, CV_8UC1, cv::Scalar(128));
++        CHECK(sigfm_image_coverage(too_small.data, 4, 4) == 0.0);
++
++        cv::Mat blank(64, 80, CV_8UC1, cv::Scalar(128));
++        CHECK(sigfm_image_coverage(blank.data, 80, 64) == 0.0);
++
++        cv::Mat textured(64, 80, CV_8UC1);
++        for (int y = 0; y < textured.rows; ++y) {
++            for (int x = 0; x < textured.cols; ++x) {
++                textured.at<unsigned char>(y, x) = ((x + y) & 1) ? 50 : 0;
++            }
++        }
++        // Exactly 25 grey levels of standard deviation is active (>= gate).
++        CHECK(sigfm_image_coverage(textured.data, 80, 64) == doctest::Approx(1.0));
++
++        blank.setTo(cv::Scalar(128));
++        for (int y = 2; y < 10; ++y) {
++            for (int x = 2; x < 10; ++x) {
++                blank.at<unsigned char>(y, x) = ((x + y) & 1) ? 255 : 0;
++            }
++        }
++        // 9 columns * 7 rows of complete 8x8 tiles inside the 2 px border.
++        CHECK(sigfm_image_coverage(blank.data, 80, 64) == doctest::Approx(1.0 / 63.0));
++    }
++
++    TEST_CASE("translation consensus is an opt-in A/B variant")
++    {
++        const std::vector<cv::Point2f> pts = {
++            {15.0F, 15.0F}, {45.0F, 20.0F}, {90.0F, 18.0F}, {130.0F, 25.0F},
++            {25.0F, 60.0F}, {75.0F, 55.0F}, {120.0F, 65.0F}, {20.0F, 105.0F},
++            {80.0F, 100.0F}, {135.0F, 110.0F},
++        };
++        std::vector<cv::Point2f> transformed;
++        for (const auto &p : pts) {
++            transformed.emplace_back(1.1F * p.x + 7.0F, 1.1F * p.y - 5.0F);
++        }
++        SigfmPtr probe = make_synthetic_features(pts);
++        SigfmPtr enrolled = make_synthetic_features(transformed);
++
++        cv::setRNGSeed(42);
++        CHECK(sigfm_match_score(probe.get(), enrolled.get()) == 10);
++        cv::setRNGSeed(42);
++        CHECK(sigfm_match_score_with_flags(
++                  probe.get(), enrolled.get(), SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS) == 10);
++        CHECK(sigfm_match_score_with_flags(probe.get(), enrolled.get(), 0x80000000U) < 0);
++    }
 +}
 diff --git a/meson.build b/meson.build
 index ab09dc1..605bc38 100644
@@ -2728,7 +3161,7 @@ index ab09dc1..605bc38 100644
  
          optional_deps += openssl_dep
 diff --git a/tests/meson.build b/tests/meson.build
-index aad0675..e537f7b 100644
+index aad0675..1f2b14e 100644
 --- a/tests/meson.build
 +++ b/tests/meson.build
 @@ -292,7 +292,7 @@ else
@@ -2776,12 +3209,33 @@ index aad0675..e537f7b 100644
          dependencies: [ libfprint_private_dep ] + extra_deps,
          c_args: common_cflags,
          link_whole: test_utils,
+@@ -377,6 +388,20 @@ foreach test_name: unit_tests
+     )
+ endforeach
+ 
++if 'goodix_gm168' in drivers
++    test_goodix_gm168_layout = executable(
++        'test-goodix-gm168-frame-layout',
++        'test-goodix-gm168-frame-layout.c',
++        dependencies: libfprint_private_dep,
++        c_args: common_cflags,
++    )
++    test('goodix-gm168-frame-layout',
++        test_goodix_gm168_layout,
++        suite: ['unit-tests'],
++        env: envs,
++    )
++endif
++
+ # Run udev rule generator with fatal warnings
+ hwdb_envs = envs
+ hwdb_envs.set('UDEV_HWDB', udev_hwdb.full_path())
 diff --git a/tests/test-fpi-sigfm.c b/tests/test-fpi-sigfm.c
 new file mode 100644
-index 0000000..07722c6
+index 0000000..6bb59d9
 --- /dev/null
 +++ b/tests/test-fpi-sigfm.c
-@@ -0,0 +1,724 @@
+@@ -0,0 +1,829 @@
 +/*
 + * Unit tests for FPI_PRINT_SIGFM core integration
 + *
@@ -2813,10 +3267,13 @@ index 0000000..07722c6
 +
 +#if defined(HAVE_SIGFM) && HAVE_SIGFM
 +
++#include "sigfm/sigfm.hpp"
++
 +/* Minimal mock FpImageDevice subclass for testing SIGFM vs NBIS core behavior */
 +struct _FpiTestImgDev
 +{
 +  FpImageDevice parent;
++  guint deactivate_count;
 +};
 +
 +#define FPI_TYPE_TEST_IMG_DEV (fpi_test_img_dev_get_type ())
@@ -2833,6 +3290,14 @@ index 0000000..07722c6
 +fpi_test_img_dev_close (FpImageDevice *dev)
 +{
 +  fpi_image_device_close_complete (dev, NULL);
++}
++
++static void
++fpi_test_img_dev_deactivate (FpImageDevice *dev)
++{
++  FpiTestImgDev *self = FPI_TEST_IMG_DEV (dev);
++
++  self->deactivate_count++;
 +}
 +
 +static void
@@ -2856,6 +3321,7 @@ index 0000000..07722c6
 +  img_class->bz3_threshold = 8;
 +  img_class->img_open = fpi_test_img_dev_open;
 +  img_class->img_close = fpi_test_img_dev_close;
++  img_class->deactivate = fpi_test_img_dev_deactivate;
 +}
 +
 +typedef FpImageDeviceClass FpiTestImgDevAutoResetClass;
@@ -2981,10 +3447,13 @@ index 0000000..07722c6
 +  g_assert_cmpuint (len_plain, ==, len_inv);
 +  g_assert_cmpmem (data_plain, len_plain, data_inv, len_inv);
 +
-+  /* Blank image yields 0 keypoints -> error */
-+  g_assert_false (extract_sigfm_sync (img_blank, NULL, &error));
-+  g_assert_error (error, G_IO_ERROR, G_IO_ERROR_FAILED);
-+  g_clear_error (&error);
++  /* Blank images are valid extraction results; FpImageDevice's quality gate
++   * classifies their zero keypoints as a centered-finger retry. */
++  g_assert_true (extract_sigfm_sync (img_blank, NULL, &error));
++  g_assert_no_error (error);
++  g_assert_nonnull (fpi_image_get_sigfm_info (img_blank));
++  g_assert_cmpint (sigfm_keypoints_count (fpi_image_get_sigfm_info (img_blank)), ==, 0);
++  g_assert_cmpfloat (fpi_image_get_sigfm_coverage (img_blank), ==, 0.0);
 +
 +  /* Empty 0x0 + flip/invert flags and NULL data -> G_IO_ERROR_INVALID_DATA without crash */
 +  {
@@ -3052,6 +3521,53 @@ index 0000000..07722c6
 +    g_assert_true (extract_sigfm_sync (img_retry, NULL, &error));
 +    g_assert_no_error (error);
 +  }
++}
++
++static void
++test_sigfm_capture_quality_gate (void)
++{
++  g_autoptr(FpDevice) dev = g_object_new (FPI_TYPE_TEST_IMG_DEV, NULL);
++  FpImageDevice *img_dev = FP_IMAGE_DEVICE (dev);
++  g_autoptr(FpImage) good = make_patterned_image (120, 120, FALSE, FALSE);
++  g_autoptr(FpImage) blank = fp_image_new (120, 120);
++  g_autoptr(FpImage) partial = make_patterned_image (120, 120, FALSE, FALSE);
++  g_autoptr(GError) error = NULL;
++  SigfmImgInfo *partial_info;
++  gdouble partial_coverage;
++
++  g_assert_true (extract_sigfm_sync (good, NULL, &error));
++  g_assert_no_error (error);
++  g_assert_true (extract_sigfm_sync (blank, NULL, &error));
++  g_assert_no_error (error);
++
++  fpi_image_device_set_sigfm_quality_gate (img_dev, 30, 0.55);
++
++  g_assert_true (fpi_image_device_check_sigfm_quality (img_dev, good, TRUE, &error));
++  g_assert_no_error (error);
++
++  g_assert_false (fpi_image_device_check_sigfm_quality (img_dev, blank, FALSE, &error));
++  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
++  g_clear_error (&error);
++
++  /* Preserve high-contrast texture only in the left third: enough keypoints
++   * for matching, but insufficient spatial coverage for enrollment/no-match. */
++  for (gint y = 0; y < 120; y++)
++    for (gint x = 40; x < 120; x++)
++      partial->data[y * 120 + x] = 128;
++
++  g_assert_true (extract_sigfm_sync (partial, NULL, &error));
++  g_assert_no_error (error);
++  partial_info = fpi_image_get_sigfm_info (partial);
++  partial_coverage = fpi_image_get_sigfm_coverage (partial);
++  g_assert_cmpint (sigfm_keypoints_count (partial_info), >=, 30);
++  g_assert_cmpfloat (partial_coverage, <, 0.55);
++
++  /* Verify performs matching before applying the coverage-only retry. */
++  g_assert_true (fpi_image_device_check_sigfm_quality (img_dev, partial, FALSE, &error));
++  g_assert_no_error (error);
++  g_assert_false (fpi_image_device_check_sigfm_quality (img_dev, partial, TRUE, &error));
++  g_assert_error (error, FP_DEVICE_RETRY, FP_DEVICE_RETRY_CENTER_FINGER);
++  g_clear_error (&error);
 +}
 +
 +static void
@@ -3387,6 +3903,47 @@ index 0000000..07722c6
 +  fpi_image_device_set_sigfm_dup_threshold (FP_IMAGE_DEVICE (dev), 0);
 +}
 +
++static FpImageDevicePrivate *
++test_img_dev_priv (FpImageDevice *self)
++{
++  FpImageDeviceClass *base_class = g_type_class_peek_static (FP_TYPE_IMAGE_DEVICE);
++
++  return G_STRUCT_MEMBER_P (self,
++                            g_type_class_get_instance_private_offset (base_class));
++}
++
++static void
++test_sigfm_deferred_deactivation (void)
++{
++  g_autoptr(FpDevice) dev = g_object_new (FPI_TYPE_TEST_IMG_DEV, NULL);
++  FpImageDevice *img_dev = FP_IMAGE_DEVICE (dev);
++  FpImageDevicePrivate *priv = test_img_dev_priv (img_dev);
++
++  /* A final enrollment result while the finger remains down only records the
++   * deactivation request; it must not enter the driver yet. */
++  priv->active = TRUE;
++  priv->state = FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF;
++  priv->finger_present = TRUE;
++  fpi_image_device_deactivate (img_dev, FALSE);
++  g_assert_true (priv->action_pending_deactivation);
++  g_assert_cmpuint (FPI_TEST_IMG_DEV (dev)->deactivate_count, ==, 0);
++  g_assert_cmpint (priv->state, ==, FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF);
++
++  /* Finger-off alone is insufficient while asynchronous SIFT is still active. */
++  priv->state = FPI_IMAGE_DEVICE_STATE_IDLE;
++  priv->finger_present = FALSE;
++  priv->minutiae_scan_active = TRUE;
++  fpi_image_device_deactivate (img_dev, FALSE);
++  g_assert_true (priv->action_pending_deactivation);
++  g_assert_cmpuint (FPI_TEST_IMG_DEV (dev)->deactivate_count, ==, 0);
++
++  /* The mock deliberately leaves completion under test control. Avoid the
++   * unrelated static/shared enum-registration issue in this unit executable. */
++  priv->active = FALSE;
++  priv->state = FPI_IMAGE_DEVICE_STATE_INACTIVE;
++  priv->minutiae_scan_active = FALSE;
++}
++
 +static void
 +test_sigfm_verify_retry (void)
 +{
@@ -3494,15 +4051,111 @@ index 0000000..07722c6
 +
 +#if defined(HAVE_SIGFM) && HAVE_SIGFM
 +  g_test_add_func ("/sigfm/image/extract_and_normalize", test_sigfm_image_extract_and_normalize);
++  g_test_add_func ("/sigfm/image/capture_quality_gate", test_sigfm_capture_quality_gate);
 +  g_test_add_func ("/sigfm/print/equal_and_serialize", test_sigfm_print_equal_and_serialize);
 +  g_test_add_func ("/sigfm/print/deserialize_corrupted", test_sigfm_deserialize_corrupted);
 +  g_test_add_func ("/sigfm/print/match_and_nbis_compat", test_sigfm_match_and_nbis_compat);
 +  g_test_add_func ("/sigfm/image_device/rejects_old_nbis", test_sigfm_image_device_rejects_old_nbis);
 +  g_test_add_func ("/sigfm/image_device/enroll_antidup", test_sigfm_enroll_antidup);
++  g_test_add_func ("/sigfm/image_device/deferred_deactivation", test_sigfm_deferred_deactivation);
 +  g_test_add_func ("/sigfm/image_device/verify_retry", test_sigfm_verify_retry);
 +#else
 +  g_test_add_func ("/sigfm/skipped", test_sigfm_skipped);
 +#endif
++
++  return g_test_run ();
++}
+diff --git a/tests/test-goodix-gm168-frame-layout.c b/tests/test-goodix-gm168-frame-layout.c
+new file mode 100644
+index 0000000..3fc3add
+--- /dev/null
++++ b/tests/test-goodix-gm168-frame-layout.c
+@@ -0,0 +1,88 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/* Synthetic Goodix GM168SEC frame-layout and 12-bit decoder test. */
++
++#include <glib.h>
++
++#include "drivers/goodix_gm168/gm168_frame_layout.h"
++
++static void
++test_stream_to_image_index (void)
++{
++  gboolean seen[GM168_FRAME_PIXELS] = { 0 };
++
++  g_assert_cmpuint (GM168_FRAME_W, ==, 80);
++  g_assert_cmpuint (GM168_FRAME_H, ==, 64);
++  g_assert_cmpuint (GM168_FRAME_PIXELS, ==, 5120);
++  g_assert_cmpuint (GM168_OUTPUT_W, ==, 160);
++  g_assert_cmpuint (GM168_OUTPUT_H, ==, 128);
++
++  g_assert_cmpuint (gm168_stream_to_image_index (0), ==, 0);
++  g_assert_cmpuint (gm168_stream_to_image_index (1), ==, GM168_FRAME_W);
++  g_assert_cmpuint (gm168_stream_to_image_index (63), ==, 63 * GM168_FRAME_W);
++  g_assert_cmpuint (gm168_stream_to_image_index (64), ==, 1);
++  g_assert_cmpuint (gm168_stream_to_image_index (5119), ==, GM168_FRAME_PIXELS - 1);
++
++  for (guint i = 0; i < GM168_FRAME_PIXELS; i++)
++    {
++      guint image_index = gm168_stream_to_image_index (i);
++
++      g_assert_cmpuint (image_index, <, GM168_FRAME_PIXELS);
++      g_assert_false (seen[image_index]);
++      seen[image_index] = TRUE;
++    }
++}
++
++static void
++test_decode_packed_frame (void)
++{
++  guint8 wire[GM168_TLS_FRAME_SIZE];
++  guint16 expected_stream[GM168_FRAME_PIXELS];
++  guint16 decoded[GM168_FRAME_PIXELS] = { 0 };
++
++  /* Non-zero padding/trailer proves that only the 96 data bytes per 132-byte
++   * wire row participate in decoding. */
++  memset (wire, 0xA5, sizeof (wire));
++
++  for (guint k = 0; k < GM168_FRAME_PIXELS; k++)
++    expected_stream[k] = (guint16) ((k * 257U + k / 7U) & 0x0FFFU);
++
++  for (guint k = 0; k < GM168_FRAME_PIXELS; k += 4)
++    {
++      guint16 p0 = expected_stream[k];
++      guint16 p1 = expected_stream[k + 1];
++      guint16 p2 = expected_stream[k + 2];
++      guint16 p3 = expected_stream[k + 3];
++      guint compact = (k / 4U) * 6U;
++      guint row = compact / GM168_WIRE_ROW_DATA;
++      guint column = compact % GM168_WIRE_ROW_DATA;
++      guint8 *dst = wire + row * GM168_WIRE_ROW_STRIDE + column;
++
++      dst[0] = (guint8) (((p0 >> 8) & 0x0FU) | ((p1 & 0x0FU) << 4));
++      dst[1] = (guint8) (p0 & 0xFFU);
++      dst[2] = (guint8) (p2 & 0xFFU);
++      dst[3] = (guint8) (p1 >> 4);
++      dst[4] = (guint8) (p3 >> 4);
++      dst[5] = (guint8) (((p2 >> 8) & 0x0FU) | ((p3 & 0x0FU) << 4));
++    }
++
++  g_assert_cmpint (gm168_decode_frame (wire, sizeof (wire), decoded), ==, 0);
++  for (guint k = 0; k < GM168_FRAME_PIXELS; k++)
++    g_assert_cmpuint (decoded[gm168_stream_to_image_index (k)], ==,
++                      expected_stream[k]);
++
++  g_assert_cmpint (gm168_decode_frame (wire, GM168_TLS_PAYLOAD_SIZE - 1, decoded), ==, -1);
++  g_assert_cmpint (gm168_decode_frame (NULL, sizeof (wire), decoded), ==, -1);
++  g_assert_cmpint (gm168_decode_frame (wire, sizeof (wire), NULL), ==, -1);
++}
++
++int
++main (int argc, char **argv)
++{
++  g_test_init (&argc, &argv, NULL);
++  g_test_add_func ("/goodix-gm168/stream-to-image-index",
++                   test_stream_to_image_index);
++  g_test_add_func ("/goodix-gm168/decode-packed-frame",
++                   test_decode_packed_frame);
 +
 +  return g_test_run ();
 +}

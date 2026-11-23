@@ -6,7 +6,7 @@ This guide covers building the `goodix_gm168` overlay in an isolated directory, 
 
 | Verification Level | What It Proves | What It Does **Not** Prove | Hardware / Privileges Needed |
 |---|---|---|---|
-| **Offline Synthetic Suites** (`meson test`, `test_timeouts.c`, Valgrind) | Timeout `_Static_assert` contracts; OpenSSL 3 dependency enforcement; SIGFM SIFT/RANSAC/serialization math; `FPI_PRINT_SIGFM` `FP3` integration; DPAPI v1/TLV parsing, white-box crypto, zero-sentinel gates, `0xE4` reply validators, and secret buffer cleansing on synthetic vectors | Physical USB packet timing on a specific laptop host; actual MCU responses for untested firmware revisions; cold-reboot/suspend persistence; real-finger FAR/FRR across diverse populations | None (unprivileged, zero USB access) |
+| **Offline Synthetic Suites** (`meson test`, `test_timeouts.c`, Valgrind) | Timeout `_Static_assert` contracts; OpenSSL 3 dependency enforcement; SIGFM reciprocal/RANSAC/serialization math, tiled coverage and lifecycle guards; exact packed-frame layout; `FPI_PRINT_SIGFM` `FP3` integration; DPAPI v1/TLV parsing, white-box crypto, zero-sentinel gates, `0xE4` reply validators, and secret buffer cleansing on synthetic vectors | Physical USB packet timing on a specific laptop host; actual MCU responses for untested firmware revisions; cold-reboot/suspend persistence; real-finger FAR/FRR across diverse populations | None (unprivileged, zero USB access) |
 | **Live Hardware Validation** (human user with `27c6:589a`) | End-to-end USB `A0`/`B0`/`B2` transport, `0xE4` recovery/hash verification, TLS 1.2 handshake on host OpenSSL 3, dark BG capture, `20`-stage enrollment, `verify` reliability, cold reboot, suspend/resume, and local impostor rejection | Cross-device portability across arbitrary hardware lots, unconfirmed firmware variants, or population-scale FAR/FRR | Physical `27c6:589a` sensor (`GFUSB_GM168SEC_APP_10036`) + interactive user |
 
 ## 1. Isolated Overlay Apply and Build
@@ -51,17 +51,24 @@ When `doctest` (`>= 2.0.0, < 3.0.0`) and `cairo` are present, this executes the 
 | Test Target | Source | Coverage Summary |
 |---|---|---|
 | `goodix-gm168-psk-recovery` | `tests/test-goodix-gm168-psk-recovery.c` (links `gm168_psk_recovery.c` without USB) | Derived 16-byte root secret SHA-256 fingerprint; public `gm168_public_zero_psk_whitebox` sentinel round-trip; `14` pinned synthetic KAT decrypts + `0..100` B length sweep; rejection of bad blob lengths, tampered HMACs, corrupt PKCS#7 padding, non-canonical IVs; clean `ERR_peek_error() == 0`; DPAPI v1 dynamic field-order parsing, bit-length algorithm fields, early cumulative-bounds rejection (`3992` B max), and progressive `NEED_MORE` prefixes; exact `104`-byte `0xbb010003` TLV checks; `0xbb020001` hash mismatch zeroization of `psk_out`; zero-PSK hash/record sentinels; `0xE4` hash & area reply validators |
-| `sigfm-tests` | `libfprint/sigfm/tests.cpp` (`doctest`) | Null/empty/blank image handling; `SGFM` v1 serialization round-trip & copy isolation; rejection of truncated, trailing, bad magic/version, oversized count (`> 16384`), and `NaN`/`Inf` floats; synthetic affine-transformed genuine vs impostor pattern scoring; RANSAC `scale` (`[0.80, 1.25]`) and `inlier_ratio` (`>= 0.40`) boundaries |
-| `fpi-sigfm` | `tests/test-fpi-sigfm.c` | Async `GTask` extraction + `H_FLIPPED`/`V_FLIPPED`/`COLORS_INVERTED` normalization (`PARTIAL` preserved); concurrent `G_IO_ERROR_ADDRESS_IN_USE` guard; `FP3` round-trip & corrupt variant rejection; strict `FPI_PRINT_SIGFM` vs `FPI_PRINT_NBIS` compatibility rejection; enroll anti-dup `max_score`; verify auto-retry counter & reset semantics |
+| `sigfm-tests` | `libfprint/sigfm/tests.cpp` (`doctest`) | Null/empty/blank image handling; `SGFM` v1 serialization round-trip & copy isolation; rejection of truncated, trailing, bad magic/version, oversized count (`> 16384`), and `NaN`/`Inf` floats; synthetic affine-transformed genuine vs impostor pattern scoring; reciprocal many-to-one rejection; tiled coverage boundary; opt-in translation-consensus A/B path; RANSAC `scale` (`[0.80, 1.25]`) and `inlier_ratio` (`>= 0.40`) boundaries |
+| `fpi-sigfm` | `tests/test-fpi-sigfm.c` | Async `GTask` extraction + normalization (`PARTIAL` preserved); zero-keypoint and partial-coverage centered-finger policy; deferred-deactivation guards; concurrent extraction guard; `FP3` round-trip & corrupt variant rejection; strict SIGFM/NBIS compatibility; enroll anti-dup `max_score`; verify auto-retry counter & reset semantics |
+| `goodix-gm168-frame-layout` | `tests/test-goodix-gm168-frame-layout.c` (integration patch) + `driver/gm168_frame_layout.h` | All `5120` stream-index mappings, full synthetic 12-bit packed-frame decode, non-zero padding/trailer exclusion, short/null input rejection |
 | `fpi-device`, `fpi-ssm`, `fpi-assembling` | Upstream `libfprint` core tests | `FpDevice` / `FpiSsm` / image assembling core invariants |
 
 ### Run Targeted Subsets Quickly
 
 ```bash
 meson test -C ./build-gm168 \
-  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests \
+  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
   --print-errorlogs
 ```
+
+### Translation-Consensus A/B Boundary
+
+`sigfm_match_score_with_flags()` supports `SIGFM_MATCH_FLAG_FORWARD_ONLY` (one-way matching ablation) and `SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS` (post-RANSAC residual-translation cluster). The production wrapper enables neither experimental override: reciprocal matching is always on and translation consensus is off. Synthetic tests prove deterministic execution, not a genuine/impostor improvement.
+
+Before enabling translation consensus in GM168 production code, run both variants over the **same** locally retained genuine and impostor frames, use identical preprocessing/enrollment galleries and fixed `cv::setRNGSeed()` values, and report score distributions plus threshold decisions separately. Do not publish the frames or templates. A synthetic unit-test pass alone is not authorization to change the production matcher.
 
 ### Standalone Timeout Contract Check
 
@@ -82,7 +89,7 @@ Because PSK recovery and SIGFM manipulate heap buffers and secret keys, run memo
 ```bash
 meson test -C ./build-gm168 \
   --setup=valgrind \
-  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests \
+  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
   --print-errorlogs
 ```
 
@@ -101,7 +108,7 @@ meson setup ./build-asan ./libfprint-src \
   -Dgtk-examples=false -Ddoc=false -Dinstalled-tests=false \
   -Db_sanitize=address,undefined
 meson test -C ./build-asan \
-  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests \
+  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
   --print-errorlogs
 ```
 
@@ -131,8 +138,8 @@ Only the device owner should execute live hardware tests on a physical `27c6:589
 ### Recommended Manual Validation Sequence
 
 1. **Clean migration from NBIS**: if old NBIS prints exist, delete them first (`fprintd-delete <user>`).
-2. **Activation & enrollment (`20` stages)**: run `fprintd-enroll -f right-index-finger <user>`. Touch calmly for ~0.5 s, lift completely between stages, and shift finger placement across tip, center, left/right edges, and base to cover the `4 × 3.2 mm` sensor and satisfy the anti-duplicate check (`GM168_SIGFM_DUP_THRESHOLD = 15`).
-3. **Verification series**: run `fprintd-verify -f right-index-finger <user>` across multiple centered and slightly shifted touches to observe first-touch match and auto-retry (`GM168_SIGFM_VERIFY_RETRIES = 2`).
+2. **Activation & enrollment (`20` stages)**: run `fprintd-enroll -f right-index-finger <user>`. Touch calmly for ~0.5 s, lift completely between stages, and shift finger placement across tip, center, left/right edges, and base to cover the `4 × 3.2 mm` sensor and satisfy the anti-duplicate check (`GM168_SIGFM_DUP_THRESHOLD = 15`). A feature-poor or low-coverage press should request centered placement rather than add a stage.
+3. **Verification series**: run `fprintd-verify -f right-index-finger <user>` across multiple centered and slightly shifted touches to observe first-touch match, centered-finger quality retries, and bounded no-match auto-retry (`GM168_SIGFM_VERIFY_RETRIES = 2`). Record quality retries separately from genuine no-match results.
 4. **Impostor (FAR) check**: test `5+` unenrolled fingers (your other fingers and/or consenting testers) and confirm `verify-no-match`.
 5. **Lifecycle resilience**: verify after a cold reboot (which clears MCU volatile state and exercises fresh pre-TLS `0xE4` probe/recovery) and across `3+` `systemctl suspend` / resume cycles before relying on fingerprint unlock. Always keep password authentication enabled in PAM.
 6. **Cancellation and removal**: cancel an active capture and confirm a quiet deactivate without `RECOVER` escalation. With password authentication still available, disconnect the reader during a capture and confirm `FP_DEVICE_ERROR_REMOVED`, no subsequent REARM/RECOVER commands, and a clean return after reconnecting. Treat this as a live fault-injection test, not as part of normal enrollment.

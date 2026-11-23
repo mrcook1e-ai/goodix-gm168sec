@@ -64,7 +64,11 @@ There are two separate OpenSSL 3 requirements on Fedora 45:
 
 This overlay switches `goodix_gm168` from NBIS (`FPI_PRINT_NBIS`) to SIGFM (`FPI_PRINT_SIGFM`). Old NBIS templates stored in `/var/lib/fprint/` are incompatible with SIGFM and are safely rejected by `fp_print_compatible()`.
 
-Delete your existing templates (`fprintd-delete <user>`) and re-enroll (`20` stages). During enrollment, lift completely between touches and shift your finger slightly across zones—the anti-duplicate filter (`GM168_SIGFM_DUP_THRESHOLD = 15`) rejects identical repeated placements to maximize coverage across the small `4 × 3.2 mm` capacitive pad. See [`SIGFM.md`](SIGFM.md).
+Delete your existing templates (`fprintd-delete <user>`) and re-enroll (`20` stages). During enrollment, lift completely between touches and shift your finger slightly across zones—the anti-duplicate filter (`GM168_SIGFM_DUP_THRESHOLD = 15`) rejects identical repeated placements to maximize coverage across the small `4 × 3.2 mm` capacitive pad. Existing **SGFM v1** templates remain format-compatible with the reciprocal-matching update; no format migration is implied. See [`SIGFM.md`](SIGFM.md).
+
+### Why does it ask me to center my finger instead of reporting a match result?
+
+The revised SIGFM gate rejects frames with fewer than `30` keypoints or insufficient ridge-like `8x8`-tile coverage. During enrollment this prevents a poor stage from entering the gallery. During verification, a low-coverage frame is still allowed to match; only a no-match becomes `FP_DEVICE_RETRY_CENTER_FINGER`. Use a firm, centered press and lift fully between attempts. These quality retries are not anti-spoofing decisions or calibrated FAR/FRR measurements.
 
 ---
 

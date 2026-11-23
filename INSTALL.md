@@ -75,8 +75,8 @@ meson test -C build --print-errorlogs
 
 When `doctest` and `cairo` are installed, `meson test` executes the SIGFM C++
 unit tests (`sigfm-tests`), libfprint SIGFM core integration tests (`fpi-sigfm`),
-`fpi-device`, `fpi-ssm`, and `fpi-assembling` using synthetic fixtures (no USB
-hardware required).
+the packed-frame decoder/layout test (`goodix-gm168-frame-layout`), `fpi-device`,
+`fpi-ssm`, and `fpi-assembling` using synthetic fixtures (no USB hardware required).
 
 You can also run the standalone timeout contract check directly from this repo:
 
@@ -154,6 +154,17 @@ export GOODIX_GM168_DIR="$PWD/device-state"
   `cal_scale.bin`. If you supply matching local calibration files, place them in
   the same private `0700` directory with mode `0600`, and never share or commit
   them.
+
+## SIGFM quality-gate tuning (validation only)
+
+GM168 defaults to `30` SIFT keypoints and `0.55` ridge-like tile coverage. Poor enrollment frames and low-detail verification frames produce a centered-finger retry; verification only applies the coverage test after no-match. For local A/B validation, `GM168_SIGFM_MIN_KEYPOINTS` accepts `0..1000` and `GM168_SIGFM_MIN_COVERAGE` accepts `0..1` (`0` disables the respective gate):
+
+```bash
+export GM168_SIGFM_MIN_KEYPOINTS=30
+export GM168_SIGFM_MIN_COVERAGE=0.55
+```
+
+These values are provisional heuristics, not measured FAR/FRR guarantees. Keep the defaults for normal use unless comparing identical local captures, and do not publish frames/templates. Translation consensus remains compile-time A/B API functionality and is not enabled by these environment variables.
 
 ## Fedora RPM spec (experimental / unsupported)
 
