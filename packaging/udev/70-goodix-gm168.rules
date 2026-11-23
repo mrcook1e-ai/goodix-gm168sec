@@ -1,0 +1,23 @@
+# Goodix GM168SEC fingerprint sensor (USB 27c6:589a)
+#
+# Grants the active logged-in session user permission to access the sensor via
+# logind uaccess (for direct libfprint CLI/test tools) and marks the device as
+# a fingerprint reader.
+#
+# Install locally: copy to /etc/udev/rules.d/ and reload:
+#   sudo install -m 0644 70-goodix-gm168.rules /etc/udev/rules.d/70-goodix-gm168.rules
+#   sudo udevadm control --reload
+#   sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=27c6
+#
+# Verify on the device:
+#   getfacl /dev/bus/usb/<bus>/<dev>
+# should list "user:<your-uid>:rw-".
+
+ACTION!="add|change", GOTO="goodix_gm168_end"
+
+# USB interface match — VID 0x27c6 (Goodix Technology), PID 0x589a (GM168SEC).
+SUBSYSTEM=="usb", ATTRS{idVendor}=="27c6", ATTRS{idProduct}=="589a", \
+    TAG+="uaccess", \
+    ENV{ID_FINGERPRINT_READER}="1"
+
+LABEL="goodix_gm168_end"

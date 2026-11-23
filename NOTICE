@@ -1,0 +1,52 @@
+Goodix GM168 Linux driver provenance
+====================================
+
+This repository contains an experimental libfprint driver and integration
+overlay for USB device 27c6:589a. The implementation is licensed under
+LGPL-2.1-or-later.
+
+Upstream base
+-------------
+libfprint v1.94.100, commit 80a4b5ec612892c5c056c48dddaa561452cf37ec
+https://gitlab.freedesktop.org/libfprint/libfprint
+
+Driver lineage
+--------------
+The driver sources in driver/ build on:
+https://github.com/mrcook1e-ai/goodix-gm168
+starting from commit 7f7e3710bd6405b6bc238cf85fecb74e61b4d0da
+and subsequent hardening/overlay collaboration with:
+Daniil Yakoshinov (libfprint-goodix-gm168).
+
+The original repository supplied the initial GM168 USB protocol, TLS-PSK
+transport, asynchronous libfprint state machines, image-processing pipeline, and
+build integration. Credit belongs to repository maintainer mrcook1e-ai (Oleg),
+contributor wseng, and the AI co-authorship disclosed in the repository commit
+history.
+
+Subsequent 27c6:589a hardware validation, security/lifecycle hardening, and
+clean overlay restructuring were performed by Daniil Yakoshinov in 2026, followed
+by SIGFM matching integration, GFUSB firmware/capture updates, and OpenSSL 3
+dependency selection.
+
+Parts of the Goodix transport/TLS implementation derive from the
+55b4-experimental libfprint work by Alexander Meiler, Matthieu Charette,
+and Alireza S.N., also licensed under LGPL-2.1-or-later.
+
+SIGFM matching integration
+--------------------------
+The SIGFM (Scale-Invariant Geometric Feature Matching) subsystem included in
+patches/libfprint-v1.94.100-integration.patch derives from the SIGFM
+implementation by:
+- Matthieu Charette <matthieu.charette@gmail.com>
+- Natasha England-Elbro <ashenglandelbro@protonmail.com>
+- Timur Mangliev <tigrmango@gmail.com>
+licensed under LGPL-2.1-or-later, adapted for libfprint v1.94.100 and small
+capacitive sensors with enrollment anti-duplication and verify retry support.
+
+Clean-room provenance note
+--------------------------
+The 27c6:589a protocol and image-processing path were studied from USB traffic
+and behavior of the lawfully installed Windows driver. No Goodix or Microsoft
+executable, firmware, VM image, private key, per-device calibration file,
+biometric sample, or packet capture is distributed here.

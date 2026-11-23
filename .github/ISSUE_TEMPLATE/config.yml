@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security policy
+    url: https://github.com/mrcook1e-ai/goodix-gm168sec/security/policy
+    about: Read the security policy before reporting a vulnerability or handling sensitive device data.
