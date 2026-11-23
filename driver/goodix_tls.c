@@ -456,25 +456,20 @@ goodix_gm168_tls_pull (GoodixGM168TlsServer *self, guint8 *buf, guint16 size)
     return (int)n;
 }
 
-// Read decrypted data from the MCU (after a successful handshake).
-// Must only be called after goodix_gm168_tls_feed().
-int
-goodix_gm168_tls_recv (GoodixGM168TlsServer *self, guint8 *buf, guint32 size,
-                        GError **error)
+static int
+tls_recv (GoodixGM168TlsServer *self, guint8 *buf, guint32 size,
+          GError **error, guint max_attempts)
 {
     /*
      * SSL_read can return SSL_ERROR_WANT_READ immediately after a
      * goodix_gm168_tls_feed() if the bytes haven't yet propagated
-     * through the socketpair into OpenSSL's read buffer.
-     *
-     * [G9-C] Shrunk from 50x5ms (250ms blocking the main thread) to
-     * 5x1ms (5ms cap). On WANT_READ after the cap, return 0 — the caller
-     * loops back through CAP_RX which fetches more bytes from USB and
-     * calls us again. Socketpair latency is <1ms in practice, so 5x1ms
-     * still covers the legitimate case with margin.
+     * through the socketpair into OpenSSL's read buffer. The public
+     * recv entry point permits a few 1 ms waits for that first record;
+     * recv_pending performs exactly one nonblocking attempt when draining
+     * records that are already available.
      */
     struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };  /* 1 ms */
-    for (int attempt = 0; attempt < 5; attempt++) {
+    for (guint attempt = 0; attempt < max_attempts; attempt++) {
         if (flush_feed_pending (self) < 0) {
             if (error)
                 *error = g_error_new (G_IO_ERROR, g_io_error_from_errno (errno),
@@ -488,8 +483,11 @@ goodix_gm168_tls_recv (GoodixGM168TlsServer *self, guint8 *buf, guint32 size,
             return ret;
         int ssl_err = SSL_get_error (self->ssl, ret);
         if (ssl_err == SSL_ERROR_WANT_READ) {
-            nanosleep (&ts, NULL);
-            continue;
+            if (attempt + 1 < max_attempts) {
+                nanosleep (&ts, NULL);
+                continue;
+            }
+            return 0;
         }
         if (ssl_err == SSL_ERROR_ZERO_RETURN)
             return 0;
@@ -499,8 +497,24 @@ goodix_gm168_tls_recv (GoodixGM168TlsServer *self, guint8 *buf, guint32 size,
         return ret;
     }
 
-    // WANT_READ timeout — let the caller fetch more bytes and retry.
     return 0;
+}
+
+// Read decrypted data from the MCU (after a successful handshake).
+// Must only be called after goodix_gm168_tls_feed().
+int
+goodix_gm168_tls_recv (GoodixGM168TlsServer *self, guint8 *buf, guint32 size,
+                       GError **error)
+{
+    return tls_recv (self, buf, size, error, 5);
+}
+
+// Drain another already-available TLS record without sleeping in the main loop.
+int
+goodix_gm168_tls_recv_pending (GoodixGM168TlsServer *self, guint8 *buf,
+                               guint32 size, GError **error)
+{
+    return tls_recv (self, buf, size, error, 1);
 }
 
 void

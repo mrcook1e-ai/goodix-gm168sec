@@ -76,6 +76,10 @@ int      goodix_gm168_tls_pull    (GoodixGM168TlsServer *self, guint8 *buf,
 int      goodix_gm168_tls_recv    (GoodixGM168TlsServer *self, guint8 *buf,
                                     guint32 size, GError **error);
 
+// Read one additional ready record without waiting for socketpair propagation.
+int      goodix_gm168_tls_recv_pending (GoodixGM168TlsServer *self, guint8 *buf,
+                                        guint32 size, GError **error);
+
 // Encrypt and send data to the MCU.
 int      goodix_gm168_tls_send    (GoodixGM168TlsServer *self, const guint8 *data,
                                     guint16 length);

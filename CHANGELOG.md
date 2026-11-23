@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the `goodix-gm168sec` overlay are documented in this file.
+All notable changes to the `goodix-gm168` overlay are documented in this file.
 
 ## [Unreleased]
 
@@ -33,6 +33,23 @@ All notable changes to the `goodix-gm168sec` overlay are documented in this file
 - Updated `tools/apply-overlay.sh`, `tests/test_timeouts.c`, `.gitignore`,
   `NOTICE`, `SECURITY.md`, `CONTRIBUTING.md`, `README.md`, `INSTALL.md`,
   `docs/`, and the experimental Fedora RPM spec.
+
+### Fixed
+- Background receive now processes every non-empty transfer, drains all ready
+  TLS records without extra main-loop sleeps, handles non-timeout USB errors
+  without re-listen loops, and propagates TLS failures. Consumed packets
+  are removed before capture completion, and stale immediate ACK echoes are
+  ignored consistently.
+- TLS handshake errors now fail `INIT` promptly with their original cause.
+  USB removal and cancellation bypass fallback/recovery cleanly, suppress new
+  transfers, and no longer get replaced by stale capture errors.
+- Dual-capture error fallback selects the highest-quality image and releases
+  the loser. `RECOVER` preserves a completed image across rearm failure and
+  terminates empty retry captures through `retry_scan()` instead of leaving
+  the image-device core in `CAPTURE`.
+- FDT threshold loading/calibration is atomic and rejects zero baselines;
+  Wallis output is clamped to 16 bits, SSM generation access uses a real common
+  base subobject, and obsolete framing/CLAHE code was removed.
 
 ### Known limitations
 - Tested only on limited `27c6:589a` hardware (`GFUSB_GM168SEC_APP_10036`) with

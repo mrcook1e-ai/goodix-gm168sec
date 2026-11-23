@@ -45,6 +45,8 @@ stateDiagram-v2
     INIT_TLS_TX_PULL --> INIT_TLS_RX : out_n == 0 && !tls_done
     INIT_TLS_TX_PULL --> INIT_SET_PARAM : tls_done == TRUE
     INIT_TLS_RX --> INIT_SET_PARAM : tls_done == TRUE
+    INIT_TLS_RX --> Failed : tls_error from SSL_accept
+    INIT_TLS_TX_PULL --> Failed : tls_error from SSL_accept
 
     INIT_SET_PARAM --> INIT_SET_PARAM_ACK : 0x90 (256 B)
     INIT_SET_PARAM_ACK --> INIT_DEL_TMPL_1
@@ -63,7 +65,8 @@ stateDiagram-v2
     INIT_FDT_ACK --> INIT_BG_TRIG
 
     INIT_BG_TRIG --> INIT_BG_RX : 0x20 capture trigger
-    INIT_BG_RX --> INIT_BG_PROCESS : stitch_buf >= 10564 B
+    INIT_BG_RX --> INIT_BG_PROCESS : any non-empty USB RX
+    INIT_BG_RX --> INIT_BG_REARM_34_1 : non-timeout RX error (skip BG)
     INIT_BG_PROCESS --> INIT_BG_RX : img_len < 10564 B
     INIT_BG_PROCESS --> INIT_BG_LOOP_CHECK : decoded frame accumulated
     INIT_BG_LOOP_CHECK --> INIT_BG_TRIG : bg_frames_captured < 5
@@ -85,6 +88,7 @@ stateDiagram-v2
 1. **Pre-TLS dependency**: `goodix_gm168_tls_init()` registers `psk_server_cb()` (`driver/goodix_tls.c`), which reads the 32-byte `goodix_gm168_psk` buffer as soon as the sensor sends its TLS `ClientHello` after `INIT_TLS_START` (`0xD0`). Both loading `psk.bin` and recovering from `0xE4` (`0xbb020001` + `0xbb010002`) therefore run in `INIT_PSK_GATE` **before** `0xD0` is ever sent.
 2. **Pre-TLS cryptographic proof**: before `INIT_TLS_START` runs, the active key (whether loaded from `psk.bin` or recovered from `0xbb010002` + `0xbb010003`) has **already** matched the sensor's fresh `0xbb020001` SHA-256 reply in constant time (`CRYPTO_memcmp`).
 3. **Why TLS failure never invokes recovery**: if `SSL_accept()` subsequently fails, the PSK is already known to match the MCU's `0xbb020001` digest. A failure at that stage indicates an OpenSSL provider/cipher-policy mismatch (e.g., missing `OPENSSL_CONF` for legacy `PSK-AES128-CBC-SHA256` on Fedora 45), a stale MCU TLS state from an unreset prior session, or USB framing loss—none of which can be fixed by re-reading `0xE4`. Falling back to recovery after TLS failure would also violate the fail-closed policy when an existing `psk.bin` mismatches.
+4. **Handshake error propagation**: `on_tls_done()` stores the handshake `GError` in `self->tls_error` and cancels the current I/O wait. The INIT callbacks consume that saved error before their generic cancellation handling, so activation fails promptly with the TLS cause rather than the INIT watchdog. No PSK recovery is attempted.
 
 ## `CAP`, `REARM`, `RECOVER`, and `DEINIT` State Machines
 
@@ -134,7 +138,8 @@ stateDiagram-v2
         RECOVER_SESSION --> [*] : Preserves TLS & cached background
     }
 
-    RECOVER --> POLL : RECOVER OK && !capture_error
+    RECOVER --> [*] : RECOVER OK && saved image -> image_captured
+    RECOVER --> POLL : RECOVER OK && no image -> retry_scan / next touch
     RECOVER --> Failed : capture_error present or RECOVER failed
 
     state DEINIT {
@@ -147,6 +152,10 @@ stateDiagram-v2
 - **Budget-bounded `CAP_RX`**: each `CAP_RX` USB read uses `min(GM168_USB_RX_SHORT_TIMEOUT_MS, max(50, GM168_CAPTURE_BUDGET_MS - elapsed_ms))` (`1000 ms` max, `600 ms` total touch budget, `50 ms` floor) so a quiet sensor cannot stall past the budget.
 - **Re-trigger on consecutive timeouts**: after `GM168_CAP_RX_RETRIG_AFTER` (`2`) consecutive `CAP_RX` timeouts, `capture_rx_cb()` jumps back to `CAP_TRIG` once in case the sensor dropped the scan trigger.
 - **1-byte framing resync**: in `CAP_PROCESS`, encountering an unknown packet type byte drops **only 1 byte** from `self->stitch_buf` rather than wiping the whole buffer, preserving trailing valid packets.
+- **TLS record drain and packet ownership**: after each `B0`/`B2` feed, `gm168_tls_drain()` reads the first record with the bounded socketpair wait and then drains all already-available records without sleeping. The consumed wire packet is removed from `stitch_buf` before `CAP` can complete, while any unprocessed tail remains buffered.
+- **Background short-read progress**: every non-empty `INIT_BG_RX` transfer advances to `INIT_BG_PROCESS`; a residual wire tail smaller than `10564` bytes can therefore complete a partially decoded frame. A non-timeout USB error skips BG and enters the normal rearm chain instead of re-listening until the watchdog.
+- **Recovery completion contract**: a recoverable `REARM` failure preserves an already-captured `rd->img` in `RecoverData`. Successful `RECOVER` submits that image, reports a saved capture error, or calls `retry_scan()` for an interrupted quality retry. It never returns directly to polling with the core stranded in `CAPTURE`.
+- **Terminal USB/cancellation handling**: `FP_DEVICE_ERROR_REMOVED` bypasses fallback and recovery, and `G_IO_ERROR_CANCELLED` exits quietly without escalating to `RECOVER`. A recovery failure takes precedence over any older saved capture error.
 - **Bounded `wait_lift_cb()`**: polls `EP_IN` with `gm168_wait_lift_poll_ms()` (`150 ms` default, configurable `50..1000 ms` via `$GM168_WAIT_LIFT_POLL_MS`).
   - If the finger stays on or quick-taps during `wait_lift`, FDT fires (`echo=0x32, status=0x02`) and sets `rd->consumed_touch = TRUE`. On the subsequent timeout, `wait_lift_cb()` jumps back to `REARM_32` to re-arm FDT (otherwise `start_polling()` would listen on a disarmed FDT).
   - Re-arms are capped at `GM168_WAIT_LIFT_MAX_REARMS` (`8`), after which `rd->fdt_rearm_only = TRUE` triggers one final `REARM_32` and exits `REARM_WAIT_LIFT` immediately.
@@ -180,7 +189,7 @@ Any other status byte fails the SSM immediately (`FP_DEVICE_ERROR_PROTO`).
 
 - A single `16 KiB` `EP_IN` bulk transfer can contain multiple concatenated packets (`while (offset + 4 <= transfer->actual_length)`).
 - `ack_cb()` walks every packet in the transfer:
-  - Evaluates `0xA0` packets for `got_immediate` (ignoring `0x32`/`0x02` touch events).
+  - Evaluates `0xA0` packets for `got_immediate` (ignoring `0x32`/`0x02` touch events and stale ACKs whose `echo` does not match `expected_ack_cmd`, in both ACK layouts).
   - Feeds any `0xB0`/`0xB2` packets in the same bulk transfer into `process_rx_buffer_for_tls()` so coalesced TLS handshake bytes are never dropped.
   - Advances only after inspecting the full transfer; if no matching ACK was seen, `ack_resubmit_or_fail()` re-submits up to `GM168_USB_RX_RETRY_LIMIT` (`60`).
 - **Strict `0xE4` reply handling (`psk_hash_rx_cb`, `psk_read_rx_cb`)**:
@@ -194,14 +203,14 @@ Any other status byte fails the SSM immediately (`FP_DEVICE_ERROR_PROTO`).
 
 - **Monotonic generation counter (`self->generation`)**:
   - Incremented at the start of both `dev_activate()` and `dev_deactivate()`.
-  - Every `FpiSsm` stores `generation` in its `SsmData` / `RearmData` / `RecoverData` struct; `poll_cb()` and `capture_after_settle_cb()` receive `self->generation` via `user_data`.
+  - Every `FpiSsm` stores `generation` in `SsmData`; `RearmData` and `RecoverData` embed that header as their first `base` field, so `gm168_ssm_is_current()` accesses a real common subobject rather than aliasing unrelated struct types. `poll_cb()` and `capture_after_settle_cb()` receive `self->generation` via `user_data`.
   - `gm168_ssm_is_current()` and `gm168_ssm_callback_guard()` check `data->generation == self->generation` at the top of every `*_run_state` and USB callback; stale callbacks free any transfer error and fail with `G_IO_ERROR_CANCELLED`.
   - `gm168_activate_complete()` checks `self->activation_pending && generation == self->activation_generation` so deactivation mid-init cannot double-complete activation.
 - **Shared `io_cancellable`**:
   - Created fresh in `dev_activate()`, wired to `fpi_device_get_cancellable()` via `action_cancelled_cb()`, and cancelled + unrefed in `dev_deactivate()`, aborting any pending `EP_IN`/`EP_OUT` transfer immediately.
 - **USB Error Classification (`driver/gm168_usb_errors.h`)**:
   - `gm168_classify_usb_error()` categorizes `GError` into `OTHER`, `CANCELLED`, `TIMEOUT`, `NO_DEVICE`, and `IO`.
-  - `gm168_handle_fatal_usb_error()` consumes `NO_DEVICE` across all SSM USB callbacks, sets `self->device_dead = TRUE`, and emits `FP_DEVICE_ERROR_REMOVED`.
+  - `gm168_handle_fatal_usb_error()` consumes `NO_DEVICE` across all SSM USB callbacks, sets `self->device_dead = TRUE`, and emits `FP_DEVICE_ERROR_REMOVED`. Action/transfer guards read `device_dead` to suppress new polling, commands, rearm, and recovery; a later activation cannot reuse the stale TLS fast path after removal.
 
 ### Timing and Deadline Contract (`driver/gm168_timeouts.h`)
 

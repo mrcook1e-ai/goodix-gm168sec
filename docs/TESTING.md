@@ -135,3 +135,8 @@ Only the device owner should execute live hardware tests on a physical `27c6:589
 3. **Verification series**: run `fprintd-verify -f right-index-finger <user>` across multiple centered and slightly shifted touches to observe first-touch match and auto-retry (`GM168_SIGFM_VERIFY_RETRIES = 2`).
 4. **Impostor (FAR) check**: test `5+` unenrolled fingers (your other fingers and/or consenting testers) and confirm `verify-no-match`.
 5. **Lifecycle resilience**: verify after a cold reboot (which clears MCU volatile state and exercises fresh pre-TLS `0xE4` probe/recovery) and across `3+` `systemctl suspend` / resume cycles before relying on fingerprint unlock. Always keep password authentication enabled in PAM.
+6. **Cancellation and removal**: cancel an active capture and confirm a quiet deactivate without `RECOVER` escalation. With password authentication still available, disconnect the reader during a capture and confirm `FP_DEVICE_ERROR_REMOVED`, no subsequent REARM/RECOVER commands, and a clean return after reconnecting. Treat this as a live fault-injection test, not as part of normal enrollment.
+
+### Dev Logs for State-Machine Validation
+
+For a temporary local dev run, set `GM168_TRACE=1`, `G_MESSAGES_DEBUG=all`, and `GM168_LOG_DIR` to a private `0700` directory writable by `fprintd` (for example, a subdirectory of its `StateDirectory=fprint`). Inspect journal output with `journalctl -u fprintd` and structured session logs only locally. Do not enable `GM168_DUMP_FRAMES` for transport/state-machine testing, and do not publish journal or session logs without reviewing them for device-specific transport metadata. Remove the dev environment override after validation.

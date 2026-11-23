@@ -1,5 +1,14 @@
 # Image Acquisition and Preprocessing Pipeline
 
+## In Plain English (TL;DR)
+
+When your finger touches the sensor, the hardware does not immediately hand Linux a clean PNG. Instead, the driver runs a short cleanup pipeline so SIFT can see crisp skin ridges:
+
+1. **Take 5 blank "dark" pictures at cold startup** (when no finger is on the glass) to measure the sensor's baseline noise. If a finger is already resting on the pad (`mean < 2200`), the driver rejects the "poisoned" background and waits for you to lift first.
+2. **Unpack raw 12-bit USB pixels**: Each decrypted `10564`-byte frame holds `80` padded rows of packed 12-bit sensor readings, transposed into an `80×64` grayscale image.
+3. **Subtract background & boost local ridges**: Subtracting the dark baseline, removing single-pixel speckles (`3x3` median), and stretching local contrast brings out pores and ridges cleanly — no Windows calibration files needed.
+4. **Pick the sharper of 2 frames (`dual capture`) & upscale `2x`**: Touching once triggers two quick frames back-to-back (capturing the settled finger) and picks the higher-contrast one, then scales `80×64` → `160×128` (`2x`, which outperformed `3x` and `4x` in testing).
+
 The Goodix GM168SEC captures small capacitive frames (`80x64` native pixels) encrypted over TLS `B2` packets and transforms them into `160x128` 8-bit grayscale `FpImage` objects for `libfprint` `FPI_PRINT_SIGFM` extraction.
 
 > **Privacy Notice**
@@ -11,7 +20,7 @@ The Goodix GM168SEC captures small capacitive frames (`80x64` native pixels) enc
 ```mermaid
 flowchart LR
     B2["USB B2 Packet(s)<br/>(EP IN 0x83, 16 KiB)"] --> DEC_IMG["goodix_gm168_decode_img()<br/>Locate TLS 17 03 03 header"]
-    DEC_IMG --> TLS_DEC["goodix_gm168_tls_feed/recv()<br/>Accumulate 10564 B plaintext"]
+    DEC_IMG --> TLS_DEC["goodix_gm168_tls_feed + gm168_tls_drain()<br/>Drain ready records; accumulate 10564 B plaintext"]
     TLS_DEC --> UNPACK["gm168_decode_frame()<br/>80x132 -> 80x96 -> 12-bit unpack<br/>+ transpose to 64x80 u16"]
 
     UNPACK --> INIT_OR_CAP{"Init BG or<br/>Live Touch?"}
@@ -66,6 +75,10 @@ When no optional calibration files are loaded, `INIT` captures **`GM168_BG_FRAME
   - If a finger is resting on the sensor during cold start, `bg_mean` drops below `2200`; accepting that frame would poison background subtraction for the entire session.
   - On rejection, the driver frees `background_sum`, sets `bg_waiting_lift = TRUE`, runs `INIT_BG_REARM_*` + `INIT_BG_WAIT_LIFT`, and retries up to `GM168_BG_RETRIES` (default **`3`**, max `10`) before failing `INIT`.
 
+### Atomic FDT Threshold Loading and Calibration
+
+Saved `fdt_thresholds.bin` data is validated across all six channels before any byte of `self->fdt_setup` is changed. Runtime calibration likewise computes all six thresholds locally and rejects the whole packet if any baseline is zero; it never persists a zero threshold that the next activation would reject. Invalid input therefore leaves the previous complete default/valid setup intact.
+
 ## Preprocessing Paths
 
 `gm168_envelope_stretch()` (`driver/goodix_gm168.c`) implements two mutually exclusive paths, followed by `2x` bilinear scaling:
@@ -74,7 +87,7 @@ When no optional calibration files are loaded, `INIT` captures **`GM168_BG_FRAME
 
 1. **Background subtraction (`gm168_bg_subtract`)**: `out[i] = clamp(raw[i] - bg[i] + 0x800, 0, 0xFFF)` (pass-through if `bg == NULL`).
 2. **3×3 median filter (`gm168_median3x3`)**: suppresses hot/flicker pixel outliers while preserving ridge edges.
-3. *(Opt-in only, default OFF)* **Wallis local-mean smoother (`gm168_smooth_wallis`, `GM168_USE_WALLIS=1`)**: subtracts an 11×11 local mean + `3000`. **Keep disabled**: removing low-frequency variation degrades downstream envelope contrast and causes matching regressions.
+3. *(Opt-in only, default OFF)* **Wallis local-mean smoother (`gm168_smooth_wallis`, `GM168_USE_WALLIS=1`)**: computes `clamp(input - 11×11 local mean + 3000, 0, 65535)`. The upper clamp prevents wraparound when optional CAL2 output uses the full 16-bit range. **Keep disabled**: removing low-frequency variation degrades downstream envelope contrast and causes matching regressions.
 4. **3×3 binomial blur (`gm168_binomial3x3`)**: `(1,2,1; 2,4,2; 1,2,1) / 16` with half-up rounding (`(s + 8) >> 4`).
 5. **Horizontal & Vertical 11-pixel envelopes (`gm168_envelope_h`, `gm168_envelope_v`, `gm168_envelope_combine`)**: sliding min/max over `GM168_ENV_WIN = 11` pixels (edge-replicated), combined as `low = min(low_h, low_v)` and `high = max(high_h, high_v)`.
 6. **5-point X morphological close (`gm168_morph_close_x5`)**: erodes `high` (min over center + 4 diagonals) and dilates `low` (max over center + 4 diagonals).
@@ -120,7 +133,7 @@ To avoid submitting smudged landing frames or timing out on held touches, `captu
 3. **Dual capture (`dual_in_second`)**:
    - Once the first quality-accepted frame (`dual_pending_img`) is obtained, the driver immediately triggers a **second** `SCAN_TRIG` (`start_capture_ssm()`) **without** an intermediate `REARM` (mirroring observed Windows capture behavior while the finger stays settled).
    - When frame #2 finishes, `capture_completed()` picks whichever of `#1` or `#2` has the higher `quality` score and submits it via `start_rearm_ssm()`.
-   - **Error fallback**: if a subsequent retry or dual frame #2 fails with a capture error while `best_img` or `dual_pending_img` already holds a viable frame, that best frame is submitted cleanly instead of failing the stage.
+   - **Error fallback**: if a subsequent retry or dual frame #2 fails with a recoverable capture error while `best_img` or `dual_pending_img` already holds a viable frame, the candidate with the higher quality is submitted and the other is released. `FP_DEVICE_ERROR_REMOVED` and cancellation never use this fallback.
 
 ## Diagnostic Frame Dumps (`GM168_DUMP_FRAMES`)
 
