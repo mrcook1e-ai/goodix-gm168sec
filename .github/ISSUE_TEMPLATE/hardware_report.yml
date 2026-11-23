@@ -1,0 +1,74 @@
+name: "Hardware Validation Report"
+description: "Report test results for an independent 27c6:589a sensor / laptop model"
+title: "[Hardware Report]: "
+labels: ["hardware-test"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Community Device Validation
+        Testing on independent hardware is the most valuable contribution to this driver!
+        Please read [CONTRIBUTING.md](https://github.com/mrcook1e-ai/goodix-gm168sec/blob/main/CONTRIBUTING.md) before submitting.
+
+  - type: input
+    id: laptop_model
+    attributes:
+      label: "Laptop Make & Model"
+      placeholder: "e.g. Honor MagicBook Pro 16 / Lenovo ThinkPad E14 Gen 5"
+    validations:
+      required: true
+
+  - type: input
+    id: lsusb_line
+    attributes:
+      label: "lsusb Output"
+      placeholder: "Bus 003 Device 002: ID 27c6:589a Shenzhen Goodix Technology Co.,Ltd."
+    validations:
+      required: true
+
+  - type: input
+    id: firmware_string
+    attributes:
+      label: "Firmware Revision"
+      placeholder: "e.g. GFUSB_GM168SEC_APP_10036"
+    validations:
+      required: true
+
+  - type: input
+    id: distro_details
+    attributes:
+      label: "Linux Distribution & Desktop Environment"
+      placeholder: "e.g. Fedora 45 (GNOME 48 / Budgie), Arch Linux (KDE Plasma 6)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: psk_source
+    attributes:
+      label: "PSK Mode"
+      description: "How was the sensor PSK handled?"
+      options:
+        - "Automatic in-memory recovery (no psk.bin)"
+        - "Loaded from /etc/goodix-gm168/psk.bin"
+        - "Both verified"
+        - "Failed to recover / authenticate"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: features_tested
+    attributes:
+      label: "Functionality Results"
+      options:
+        - label: "Device detection and initialization succeed"
+        - label: "Fingerprint enrollment succeeds (20 stages)"
+        - label: "Verification / PAM authentication succeeds"
+        - label: "Suspend and resume cycle tested"
+
+  - type: textarea
+    id: observations
+    attributes:
+      label: "Observations & Comments"
+      description: "Match accuracy, enrollment friction, auto-retry behavior, or any edge cases noticed."
+    validations:
+      required: false

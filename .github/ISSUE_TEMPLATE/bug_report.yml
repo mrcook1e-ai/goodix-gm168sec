@@ -1,0 +1,78 @@
+name: "Bug Report"
+description: "Report a bug or unexpected failure in the Goodix GM168SEC driver"
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### ⚠️ Strict Security & Privacy Warning
+        Before submitting, verify that your report complies with [CONTRIBUTING.md](https://github.com/mrcook1e-ai/goodix-gm168sec/blob/main/CONTRIBUTING.md) and [SECURITY.md](https://github.com/mrcook1e-ai/goodix-gm168sec/blob/main/SECURITY.md).
+
+        **NEVER** attach or paste:
+        - Real device PSK bytes, PSK hashes, or Windows DPAPI / white-box blobs;
+        - Per-device calibration files (`calib_windows.dat`, `cal_scale.bin`);
+        - Raw fingerprint images (`.pgm`, `.png`, `.bmp`, `.raw`) or template dumps;
+        - Raw USB packet captures (`.pcap`, `.pcapng`) or protocol logs with session keys;
+        - Proprietary Windows `.sys`, `.inf`, or firmware binaries.
+
+  - type: input
+    id: device_info
+    attributes:
+      label: "Device Identification"
+      description: "Output of `lsusb -d 27c6:589a` and laptop model"
+      placeholder: "e.g. Bus 003 Device 004: ID 27c6:589a Shenzhen Goodix Technology Co.,Ltd. / Laptop model"
+    validations:
+      required: true
+
+  - type: input
+    id: firmware_version
+    attributes:
+      label: "Firmware Version"
+      description: "Firmware string reported by the driver (if available)"
+      placeholder: "e.g. GFUSB_GM168SEC_APP_10036"
+    validations:
+      required: false
+
+  - type: input
+    id: environment
+    attributes:
+      label: "Environment & Versions"
+      description: "Distribution, Kernel version, OpenSSL version, and libfprint commit"
+      placeholder: "e.g. Fedora 45 (kernel 6.x), OpenSSL 3.5.x, libfprint v1.94.100"
+    validations:
+      required: true
+
+  - type: input
+    id: failure_state
+    attributes:
+      label: "State Machine / Step of Failure"
+      description: "Name of the state machine (SSM) and state number if seen in logs"
+      placeholder: "e.g. GM168_SSM_TLS_HANDSHAKE (state 4)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Bug Description & Steps to Reproduce"
+      description: "Explain what happened, what was expected, and how to trigger it"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Sanitized Log Output"
+      description: "Paste terminal / journalctl output here. REMOVE all usernames, IP addresses, and private filesystem paths."
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: safety_confirmation
+    attributes:
+      label: "Data Safety Checklist"
+      options:
+        - label: "I confirm that no cryptographic keys, raw biometric frames, DPAPI records, or USB captures are included in this report."
+          required: true

@@ -1,0 +1,187 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-ubuntu:
+    name: Build & Test (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson \
+            ninja-build \
+            pkg-config \
+            gcc \
+            g++ \
+            git \
+            libglib2.0-dev \
+            libgusb-dev \
+            libpixman-1-dev \
+            libssl-dev \
+            libopencv-dev \
+            doctest-dev \
+            libcairo2-dev \
+            libgirepository1.0-dev \
+            libudev-dev \
+            valgrind
+
+      - name: Verify toolchain and library versions
+        run: |
+          pkg-config --modversion openssl
+          pkg-config --modversion opencv4
+          gcc --version
+
+      - name: Verify repository hygiene
+        run: |
+          git diff --check
+
+      - name: Run standalone timeout contract check
+        run: |
+          gcc -std=c11 -Wall -Wextra -Werror -Idriver tests/test_timeouts.c -o /tmp/test_timeouts
+          /tmp/test_timeouts
+          rm -f /tmp/test_timeouts
+
+      - name: Clone pinned libfprint v1.94.100
+        run: |
+          git clone --branch v1.94.100 --depth 1 \
+            https://gitlab.freedesktop.org/libfprint/libfprint.git ./libfprint-src
+          git -C ./libfprint-src rev-parse HEAD
+
+      - name: Apply driver overlay
+        run: |
+          ./tools/apply-overlay.sh ./libfprint-src
+
+      - name: Configure Meson build
+        run: |
+          meson setup ./build ./libfprint-src \
+            --prefix="$PWD/prefix" \
+            -Ddrivers=goodix_gm168 \
+            -Dgtk-examples=false \
+            -Ddoc=false \
+            -Dinstalled-tests=false
+
+      - name: Compile
+        run: |
+          meson compile -C ./build
+
+      - name: Run targeted test suites
+        run: |
+          meson test -C ./build \
+            goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
+            --print-errorlogs
+
+      - name: Run full test suite
+        run: |
+          meson test -C ./build --print-errorlogs
+
+      - name: Run Valgrind memory and zeroization checks
+        run: |
+          valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1 \
+            ./build/tests/test-goodix-gm168-psk-recovery
+          meson test -C ./build --setup=valgrind \
+            goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
+            --print-errorlogs
+
+  test-fedora:
+    name: Build & Test (Fedora 45)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:45
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git \
+            meson \
+            ninja-build \
+            pkgconf-pkg-config \
+            gcc \
+            gcc-c++ \
+            patch \
+            diffutils \
+            glib2-devel \
+            libgusb-devel \
+            pixman-devel \
+            openssl3-devel \
+            opencv-devel \
+            doctest-devel \
+            cairo-devel \
+            gobject-introspection-devel \
+            systemd-devel \
+            valgrind
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Mark git directory safe
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Verify toolchain and OpenSSL 3 policy
+        run: |
+          pkg-config --modversion openssl
+          pkg-config --modversion opencv4
+          gcc --version
+
+      - name: Run standalone timeout contract check
+        run: |
+          gcc -std=c11 -Wall -Wextra -Werror -Idriver tests/test_timeouts.c -o /tmp/test_timeouts
+          /tmp/test_timeouts
+          rm -f /tmp/test_timeouts
+
+      - name: Clone pinned libfprint v1.94.100
+        run: |
+          git clone --branch v1.94.100 --depth 1 \
+            https://gitlab.freedesktop.org/libfprint/libfprint.git ./libfprint-src
+          git -C ./libfprint-src rev-parse HEAD
+
+      - name: Apply driver overlay
+        run: |
+          ./tools/apply-overlay.sh ./libfprint-src
+
+      - name: Configure Meson build
+        run: |
+          meson setup ./build ./libfprint-src \
+            --prefix="$PWD/prefix" \
+            -Ddrivers=goodix_gm168 \
+            -Dgtk-examples=false \
+            -Ddoc=false \
+            -Dinstalled-tests=false
+
+      - name: Compile
+        run: |
+          meson compile -C ./build
+
+      - name: Run targeted test suites
+        run: |
+          meson test -C ./build \
+            goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
+            --print-errorlogs
+
+      - name: Run full test suite
+        run: |
+          meson test -C ./build --print-errorlogs
+
+      - name: Run Valgrind memory and zeroization checks
+        run: |
+          valgrind --leak-check=full --show-leak-kinds=all --error-exitcode=1 \
+            ./build/tests/test-goodix-gm168-psk-recovery
+          meson test -C ./build --setup=valgrind \
+            goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
+            --print-errorlogs

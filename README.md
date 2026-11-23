@@ -12,12 +12,14 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/mrcook1e-ai/goodix-gm168sec/actions/workflows/ci.yml"><img src="https://github.com/mrcook1e-ai/goodix-gm168sec/actions/workflows/ci.yml/badge.svg" alt="CI: Ubuntu 24.04 &amp; Fedora 45"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-LGPL--2.1--or--later-blue" alt="License: LGPL-2.1-or-later"></a>
   <a href="patches/libfprint-v1.94.100-integration.patch"><img src="https://img.shields.io/badge/libfprint-v1.94.100-4b5563" alt="libfprint v1.94.100"></a>
   <a href="INSTALL.md"><img src="https://img.shields.io/badge/OpenSSL-3.x-721412?logo=openssl" alt="OpenSSL 3"></a>
   <a href="INSTALL.md"><img src="https://img.shields.io/badge/Fedora-45_tested-51a2da?logo=fedora&amp;logoColor=white" alt="Fedora 45 tested"></a>
+  <a href="INSTALL.md"><img src="https://img.shields.io/badge/Ubuntu-24.04_tested-E95420?logo=ubuntu&amp;logoColor=white" alt="Ubuntu 24.04 tested"></a>
   <a href="#status"><img src="https://img.shields.io/badge/status-developer_preview-orange" alt="Status: developer preview"></a>
-  <a href="https://deepwiki.com/mrcook1e-ai/goodix-gm168sec"><img src="https://deepwiki.com/badge.svg" alt="DeepWiki documentation"></a>
+  <a href="https://deepwiki.com/mrcook1e-ai/goodix-gm168sec"><img src="https://img.shields.io/badge/DeepWiki-docs-0ea5e9?logo=gitbook&amp;logoColor=white" alt="DeepWiki documentation"></a>
 </p>
 
 <p align="center">
@@ -128,6 +130,28 @@ The sensor enforces a TLS 1.2 PSK handshake (`PSK-AES128-CBC-SHA256`) using a
   your own `psk.bin` securely and **never** commit or attach PSKs, hashes, DPAPI
   data, or calibration files to public issues.
 
+## Architecture at a glance
+
+```text
+  +-----------------------------------------------------------------+
+  |                  libfprint Core (FpiPrint / FpiSsm)             |
+  +-----------------------------------------------------------------+
+             |                                             ^
+             | (Async USB I/O & Handshake)                 | (Match / Score)
+             v                                             |
+  +----------------------------------+             +----------------+
+  |       goodix_gm168 Driver        |             | FPI_PRINT_SIGFM|
+  |  - Async USB & FpiSsm sequences  |             | - SIFT detector|
+  |  - TLS 1.2 PSK Server (OpenSSL 3)|             | - RANSAC affine|
+  |  - In-memory read-only recovery  |             | - 20-stage SGFM|
+  +----------------------------------+             +----------------+
+             |                                             ^
+             v (Packed 12-bit sensor frames)               | (160x128 frame)
+  +-----------------------------------------------------------------+
+  |  Image Pipeline: 80x64 unpack -> Dynamic dark bg subtraction    |
+  +-----------------------------------------------------------------+
+```
+
 ## Documentation library: meet the sensor, layer by layer
 
 Start with the **[documentation hub](docs/README.md)** or continue to the
@@ -164,8 +188,20 @@ negative controls without accessing a sensor. See
 [`docs/TESTING.md`](docs/TESTING.md) for Valgrind and the offline-vs-live proof
 boundary.
 
-## License and provenance
+## Acknowledgements and provenance
 
-Licensed under **LGPL-2.1-or-later**. See [`LICENSE`](LICENSE) and
-[`NOTICE`](NOTICE) for full attribution of `mrcook1e-ai`, `wseng`, Daniil
-Yakoshinov, the `55b4-experimental` Goodix work, and the SIGFM authors.
+This project builds upon the foundational research, drivers, and algorithms developed by the Linux biometrics community:
+
+| Contributor / Project | Role & Key Contributions | Links & Repositories |
+|---|---|---|
+| **Oleg ([@mrcook1e-ai](https://github.com/mrcook1e-ai))** | Original GM168 research, USB protocol structures, TLS-PSK transport, async SSM state machines, image pipeline | [`mrcook1e-ai/goodix-gm168`](https://github.com/mrcook1e-ai/goodix-gm168) |
+| **Daniil Yakoshinov ([@yakoshiq](https://github.com/yakoshiq))** | Hardware validation, security/lifecycle hardening, clean overlay restructuring, and packaging | [`yakoshiq/libfprint-goodix-gm168`](https://github.com/yakoshiq/libfprint-goodix-gm168) |
+| **wseng ([@wseng](https://github.com/wseng))** | Early driver implementation and protocol contribution | [`github.com/wseng`](https://github.com/wseng) |
+| **Space-Dev0 ([@Space-Dev0](https://github.com/Space-Dev0))** | Goodix 27c6:581a driver, reciprocal matching logic, tiled capture-coverage gate, deferred deactivation | [`goodix-fingerprint-drivers`](https://github.com/Space-Dev0/goodix-fingerprint-drivers) |
+| **Alexander Meiler ([@TheWeirdDev](https://github.com/TheWeirdDev))**, **Matthieu Charette ([@mpi3d](https://github.com/mpi3d))**, **Alireza S.N. ([@alirezasn80](https://github.com/alirezasn80))** | Foundational Goodix 55b4 TLS transport and protocol reverse-engineering | [`TheWeirdDev/libfprint (55b4-exp)`](https://github.com/TheWeirdDev/libfprint) |
+| **Matthieu Charette ([@mpi3d](https://github.com/mpi3d))**, **Natasha England-Elbro ([@ashenglandelbro](https://gitlab.freedesktop.org/ashenglandelbro))**, **Timur Mangliev ([@tigrmango](https://github.com/tigrmango))** | Original SIGFM (Scale-Invariant Geometric Feature Matching) algorithm for small capacitive sensors | [libfprint MR !530](https://gitlab.freedesktop.org/libfprint/libfprint/-/merge_requests/530) |
+| **libfprint upstream** | Core fingerprint daemon and library infrastructure | [`gitlab.freedesktop.org/libfprint/libfprint`](https://gitlab.freedesktop.org/libfprint/libfprint) |
+
+## License
+
+Licensed under **LGPL-2.1-or-later**. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for complete legal terms, copyright notices, and clean-room provenance details.
