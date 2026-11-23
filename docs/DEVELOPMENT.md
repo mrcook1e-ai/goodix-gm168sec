@@ -6,12 +6,13 @@
   `libfprint/libfprint/drivers/goodix_gm168/`
 - `patches/libfprint-v1.94.100-integration.patch` — diff against upstream
   `libfprint v1.94.100` (`80a4b5ec612892c5c056c48dddaa561452cf37ec`) adding
-  SIGFM (`libfprint/sigfm/`), `FPI_PRINT_SIGFM` core support, `test-fpi-sigfm`,
+  SIGFM (`libfprint/sigfm/`), `FPI_PRINT_SIGFM` core support, empty-gallery
+  `IDENTIFY` short-circuit, `libfprint_static_dep` test wiring, `test-fpi-sigfm`,
   `test-goodix-gm168-frame-layout`, OpenSSL 3 (`>= 3.0, < 4.0`) dependency logic, and `fprint-list-udev-hwdb`
   allowlist cleanup (`27c6:589a`)
 - `tools/apply-overlay.sh` — copies `driver/*` and the synthetic recovery test,
   then applies the patch to a clean pinned `libfprint v1.94.100` checkout
-- `tests/test_timeouts.c` — standalone compile-time check of `gm168_timeouts.h`
+- `tests/test_timeouts.c` — standalone compile-time timeout checks plus the runtime `gm168_lifecycle.h` cancellation predicate matrix
 - `tests/test-goodix-gm168-psk-recovery.c` — synthetic DPAPI/TLV/OpenSSL and E4
   reply tests; Meson links the pure recovery module without accessing USB
 - `packaging/` — `uaccess` udev rule and experimental Fedora RPM spec
@@ -43,6 +44,24 @@ rm -f /tmp/test_timeouts
 
 To verify `libfprint` links only OpenSSL 3 (`libssl.so.3` / `libcrypto.so.3`) on
 Fedora 45, inspect `ldd build/libfprint/libfprint-2.so.2*`.
+
+### Mixed Public/Private API Test Linking (`libfprint_static_dep`)
+
+Internal unit tests that exercise both public `fp_*` APIs (`fp_device_open_sync`,
+`fp_device_identify*`, `fp_device_close_sync`) and private `fpi_*` helpers
+(`fpi_image_device_*`, `fpi_print_*`) must not link against
+`libfprint_private_dep`, which pulls in both `libfprint_private` statically and
+the shared `libfprint-2.so`. Under `G_MESSAGES_DEBUG=all`, having two copies of
+the private/public GLib enum and action implementations causes duplicate
+registration failures.
+
+In the integration patch, `libfprint/meson.build` defines `libfprint_static`
+(reusing `libfprint.extract_all_objects(recursive: false)`) and exposes
+`libfprint_static_dep` (linking `libfprint_static`, `libfprint_private`, and
+`libfprint_drivers` without `libfprint-2.so`). `tests/meson.build` links
+`fpi-sigfm` against `libfprint_static_dep` with `unit_tests_link_utils` empty
+(omitting `test_utils`). Keep this pattern for any future test that mixes
+`fp_*` and `fpi_*` calls.
 
 ## Updating the integration patch
 
@@ -87,7 +106,7 @@ All diagnostic hooks are off by default:
 - `GM168_BG_MIN_MEAN`, `GM168_BG_RETRIES` — dark background validation mean floor
   and retry cap
 - `GM168_CAPTURE_SETTLE_MS`, `GM168_WAIT_LIFT_POLL_MS` — capture settle and
-  lift-poll interval overrides
+  lift-poll interval overrides (both default to `150 ms`, unchanged)
 
 ## Remaining blockers before general release / upstreaming
 
@@ -95,6 +114,10 @@ All diagnostic hooks are off by default:
   firmware versions besides `GFUSB_GM168SEC_APP_10036`.
 - Independent hardware validation of read-only PSK recovery; automatic key
   persistence and new-key provisioning remain deliberately separate concerns.
+- Follow-up analysis of displaced/angled-finger SIGFM no-matches and the observed
+  client/internal retry multiplier. Overlapped capture/`REARM` submission,
+  zero-quality false-touch drop, and empty-gallery `identify` have owner-run live
+  evidence from one clean session, but not broad independent validation.
 - Population-scale FAR/FRR evaluation of SIGFM thresholds and enrollment stages.
 - Same-frame genuine/impostor A/B validation of reciprocal matching and the new
   quality gate on revised GM168 captures; translation consensus remains disabled

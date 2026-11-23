@@ -166,6 +166,17 @@ export GM168_SIGFM_MIN_COVERAGE=0.55
 
 These values are provisional heuristics, not measured FAR/FRR guarantees. Keep the defaults for normal use unless comparing identical local captures, and do not publish frames/templates. Translation consensus remains compile-time A/B API functionality and is not enabled by these environment variables.
 
+## Optional diagnostic logging on SELinux systems
+
+`GM168_LOG_DIR` is optional. On enforcing Fedora, a systemd `ReadWritePaths=` entry controls the filesystem sandbox but does **not** grant SELinux write permission. If `/var/log/goodix-gm168` is recreated with the default `var_log_t` type, `fprintd_t` may log `EACCES` and continue without file logging. For a persistent local diagnostic setup, assign a context writable by `fprintd_t` explicitly:
+
+```bash
+sudo semanage fcontext -a -t fprintd_var_lib_t '/var/log/goodix-gm168(/.*)?'
+sudo restorecon -Rv /var/log/goodix-gm168
+```
+
+Use `semanage fcontext -m` instead of `-a` if that local rule already exists. Keep diagnostic logs outside the public repository and never publish packet captures, fingerprint images, templates, or secrets. Omit `GM168_LOG_DIR` when file diagnostics are not needed.
+
 ## Fedora RPM spec (experimental / unsupported)
 
 An experimental RPM spec lives at `packaging/fedora/libfprint-goodix-gm168.spec`.

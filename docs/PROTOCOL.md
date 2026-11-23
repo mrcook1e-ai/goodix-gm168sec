@@ -45,8 +45,8 @@ The high-level activation sequence is:
    sanity check (`GM168_BG_MIN_MEAN`, default `2200`);
 7. FDT re-arm (`0x34` x2, delay, `0xAE`, `0x32`);
 8. finger-detection polling on Bulk IN (`0x83`);
-9. settle delay (`150 ms` default), capture trigger (`0x20`), and `B2` receive;
-10. dual-capture selection, sensor re-arm, and finger-lift wait (`wait_lift`).
+9. settle delay (`150 ms` default, unchanged), capture trigger (`0x20`), and `B2` receive;
+10. dual-capture selection, early usable-frame submission (`gm168_submit_capture()`) overlapped with sensor re-arm and finger-lift wait (`wait_lift`, `150 ms` default), or zero-quality frame discard before resuming polling.
 
 Every transport phase is asynchronous through libfprint `FpiSsm` state
 machines. Deadlines, retry caps, cancellation, removal handling, and recovery
@@ -120,7 +120,7 @@ RANSAC 2D partial-affine verification) instead of NBIS:
 - enrollment anti-duplicate threshold: `15` (`GM168_SIGFM_DUP_THRESHOLD`, max
   6 consecutive duplicate rejections before safety fallback)
 - verify/identify auto-retry count: `2` (`GM168_SIGFM_VERIFY_RETRIES`)
-- quality gate: central 48x48 std-dev proxy + dual-capture selection per touch
+- quality gate: central 48x48 std-dev proxy + dual-capture selection per touch (zero-quality pairs are discarded without consuming a retry or verify attempt)
 
 These parameters were tuned on limited test hardware (`27c6:589a`, firmware
 `GFUSB_GM168SEC_APP_10036`) and remain subject to broader validation across

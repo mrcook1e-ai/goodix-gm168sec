@@ -35,7 +35,8 @@ flowchart LR
     FALLBACK --> QMET
     QMET --> SCALE["gm168_resize_2x()<br/>Bilinear 80x64 -> 160x128 (ppmm=39.37)"]
     SCALE --> QGATE["Quality Gate + Dual Capture<br/>(<=6 attempts / 600ms, 2 frames/touch)"]
-    QGATE --> LIBFPRINT["fpi_image_device_image_captured(FpImage)"]
+    QGATE -->|"best quality > 0"| LIBFPRINT["gm168_submit_capture() before REARM<br/>(overlapped with REARM / wait_lift)"]
+    QGATE -->|"both frames quality == 0"| DROP["Discard FpImage & run REARM<br/>(no retry; resume polling)"]
     LIBFPRINT --> SIGFM_QG["Normalized-frame SIGFM quality gate<br/>30 keypoints + 55% active 8x8 tiles<br/>(verify coverage only after no-match)"]
 ```
 
@@ -129,14 +130,19 @@ To avoid submitting smudged landing frames or timing out on held touches, `captu
    - **Saturation gate**: if `> 30%` of central pixels are saturated (`<= 2` or `>= 253`), immediately returns `0.0f`.
    - Otherwise returns the pixel standard deviation (`sqrt(variance)`).
 2. **Quality-gate retry loop**:
+   - `capture_after_settle_cb()` does **not** report finger-present yet; it keeps `GM168_CAPTURE_SETTLE_MS` at `150 ms` (default) and starts `CAP`.
    - Retries capture (`start_rearm_retry_ssm()` with `200 ms` delay, skipping `finger_status(FALSE)`) if `best_quality < GM168_QUALITY_THRESH` (`25.0f`) **unless**:
-     - `best_quality == 0.0f` (all-saturated/blank touch — submits immediately rather than wasting retries),
+     - `best_quality == 0.0f` (advances directly to dual capture #2 rather than spinning fast retries—the second frame on the same touch may still yield usable ridge data),
      - `capture_attempt >= GM168_MAX_CAPTURE_ATTEMPTS` (`6`), or
      - `elapsed >= GM168_CAPTURE_BUDGET_MS` (`600 ms`).
-3. **Dual capture (`dual_in_second`)**:
+3. **Dual capture (`dual_in_second`), early overlapped submission, and zero-quality discard**:
    - Once the first quality-accepted frame (`dual_pending_img`) is obtained, the driver immediately triggers a **second** `SCAN_TRIG` (`start_capture_ssm()`) **without** an intermediate `REARM` (mirroring observed Windows capture behavior while the finger stays settled).
-   - When frame #2 finishes, `capture_completed()` picks whichever of `#1` or `#2` has the higher `quality` score and submits it via `start_rearm_ssm()`.
-   - **Error fallback**: if a subsequent retry or dual frame #2 fails with a recoverable capture error while `best_img` or `dual_pending_img` already holds a viable frame, the candidate with the higher quality is submitted and the other is released. `FP_DEVICE_ERROR_REMOVED` and cancellation never use this fallback.
+   - When frame #2 finishes, `capture_completed()` picks whichever of `#1` or `#2` has the higher `quality` score:
+     - **Usable frame (`submit_q > 0.0f`)**: calls `gm168_submit_capture()` (`self->capture_submitted = TRUE`, `report_finger_status(TRUE)`, and `fpi_image_device_image_captured()`) **before** starting `REARM`. SIGFM feature extraction and verify/identify matching therefore overlap `REARM` (`0x34` discharge + `150 ms` delay + `wait_lift` default `150 ms`), while `dev_change_state(AWAIT_FINGER_OFF)` leaves reporting `finger_status(FALSE)` strictly to `rearm_completed()` / `recover_completed()`.
+     - **All-zero pair (`submit_q == 0.0f`)**: discards the image (`g_object_unref`), leaves `capture_submitted = FALSE`, generates **no** libfprint retry or verify attempt, runs `REARM`, and resumes polling once `REARM` finishes.
+   - **Error fallback**: if a subsequent retry or dual frame #2 fails with a recoverable capture error while `best_img` or `dual_pending_img` already holds a candidate, the higher-quality candidate is selected and the other is released. If its quality is `> 0.0f`, `gm168_submit_capture()` submits it before `REARM`; if its quality is `0.0f`, the zero-quality fallback is discarded without triggering a libfprint retry/verify attempt and polling resumes after `REARM`. Capture errors with no candidate continue through `REARM`/`RECOVER` to `fpi_image_device_session_error()`. `FP_DEVICE_ERROR_REMOVED` and cancellation never use this fallback.
+
+An owner-run clean live test on `27c6:589a` exercised overlapped submission and observed a zero-quality dual-capture discard followed by `REARM` and a later match, in addition to the offline synthetic coverage. This is single-device evidence only: false-FDT frequency, displaced/angled-finger matching, and same-frame A/B evaluation remain open.
 
 ## SIGFM Feature-Quality Gate
 

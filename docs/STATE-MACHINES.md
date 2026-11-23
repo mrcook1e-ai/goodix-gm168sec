@@ -7,10 +7,10 @@ All USB operations in `driver/goodix_gm168.c` execute asynchronously via `libfpr
 | State Machine | Trigger | Deadline (`driver/gm168_timeouts.h`) | Completion Handler | Purpose |
 |---|---|---|---|---|
 | `INIT` (`init_run_state`) | `dev_activate()` slow path | `10000 ms` (`GM168_INIT_DEADLINE_MS`) | `init_completed()` | Wakeup, reset, version, pre-TLS PSK check/recovery, TLS handshake, register setup, 5-frame dark BG capture, initial FDT arm |
-| `CAP` (`capture_run_state`) | `poll_cb()` touch + settle delay (or retry/dual #2) | `2000 ms` (`GM168_CAPTURE_DEADLINE_MS`) | `capture_completed()` | Scan trigger (`0x20`), budget-bounded `EP_IN` receive, `B0`/`B2` TLS decryption, quality gate & dual-capture orchestration |
-| `REARM` (`rearm_run_state`) | `capture_completed()` (normal submit, retry, or capture error) | `6000 ms` (`GM168_REARM_DEADLINE_MS`) | `rearm_completed()` | Dual `0x34` discharge, settle delay, `0xAE` IRQ arm, `0x32` FDT setup, bounded `wait_lift` finger-release loop |
-| `RECOVER` (`recover_run_state`) | `rearm_completed()` when `REARM` fails | `5000 ms` (`GM168_RECOVER_DEADLINE_MS`) | `recover_completed()` | Mid-session level-2 sensor recovery (`0x60` → `0xAE` → `0x32` → REARM chain) preserving active TLS & cached BG |
-| `DEINIT` (`deinit_run_state`) | `dev_deactivate()` | `3000 ms` (`GM168_DEINIT_DEADLINE_MS`) | `deinit_completed()` | Completes deactivation cleanly without issuing `0xD6` power-off so TLS state survives across enroll stages |
+| `CAP` (`capture_run_state`) | `poll_cb()` touch + settle delay (or retry/dual #2) | `2000 ms` (`GM168_CAPTURE_DEADLINE_MS`) | `capture_completed()` | Scan trigger (`0x20`), budget-bounded `EP_IN` receive, `B0`/`B2` TLS decryption, quality gate, dual-capture orchestration, and early `gm168_submit_capture()` before `REARM` |
+| `REARM` (`rearm_run_state`) | `capture_completed()` (after usable submit, zero-quality drop, retry, or capture error) | `6000 ms` (`GM168_REARM_DEADLINE_MS`) | `rearm_completed()` | Dual `0x34` discharge, settle delay, `0xAE` IRQ arm, `0x32` FDT setup, bounded `wait_lift` finger-release loop; clears `capture_submitted` and reports finger-off when submitted |
+| `RECOVER` (`recover_run_state`) | `rearm_completed()` when `REARM` fails | `5000 ms` (`GM168_RECOVER_DEADLINE_MS`) | `recover_completed()` | Mid-session level-2 sensor recovery (`0x60` → `0xAE` → `0x32` → REARM chain) preserving active TLS, cached BG, and `capture_submitted` |
+| `DEINIT` (`deinit_run_state`) | `dev_deactivate()` immediately, or `rearm_completed()` with `deinit_pending` | `3000 ms` (`GM168_DEINIT_DEADLINE_MS`) | `deinit_completed()` | Completes deactivation cleanly without issuing `0xD6` power-off so TLS state survives across enroll stages; active `REARM` drains first after client cancellation |
 
 ## `INIT` State Machine
 
@@ -98,7 +98,7 @@ stateDiagram-v2
     state "Capture Settle Timer (150 ms default)" as SETTLE
 
     POLL --> SETTLE : A0 touch (echo=0x32, status=0x02)
-    SETTLE --> CAP_TRIG : report_finger_status(TRUE)
+    SETTLE --> CAP_TRIG : capture_after_settle_cb() (no finger-present yet)
 
     state CAP {
         [*] --> CAP_TRIG
@@ -112,7 +112,9 @@ stateDiagram-v2
 
     CAP --> CAP_TRIG : Dual #1 complete -> start Dual #2 (no REARM)
     CAP --> REARM_34_1 : Quality-gate retry (rd->retry = TRUE)
-    CAP --> REARM_34_1 : Dual #2 complete / error fallback -> submit best
+    CAP --> REARM_34_1 : Usable best (q > 0) -> gm168_submit_capture() before REARM
+    CAP --> REARM_34_1 : Zero-quality dual / fallback -> drop FpImage (capture_submitted = FALSE)
+    CAP --> REARM_34_1 : Capture error (no candidate) -> save rd->err
 
     state REARM {
         [*] --> REARM_34_1
@@ -120,7 +122,7 @@ stateDiagram-v2
         REARM_34_1_ACK --> REARM_34_2
         REARM_34_2 --> REARM_34_2_ACK : 0x34
         REARM_34_2_ACK --> REARM_DELAY
-        REARM_DELAY --> REARM_AE : 150 ms (submit) / 200 ms (retry)
+        REARM_DELAY --> REARM_AE : 150 ms (submit/drop) / 200 ms (retry)
         REARM_AE --> REARM_AE_ACK : 0xAE
         REARM_AE_ACK --> REARM_32
         REARM_32 --> REARM_32_ACK : 0x32
@@ -129,18 +131,21 @@ stateDiagram-v2
         REARM_WAIT_LIFT --> REARM_32 : FDT touch consumed (rearm32_count < 8)
     }
 
+    REARM --> DEINIT : rearm_completed() & deinit_pending (success/error/watchdog)
     REARM --> CAP_TRIG : rearm_completed() with rd->retry == TRUE
-    REARM --> POLL : rearm_completed() -> submit image, finger_status(FALSE)
-    REARM --> RECOVER : rearm_completed(error) -> escalate
+    REARM --> [*] : rearm_completed() & capture_submitted -> finger_status(FALSE)
+    REARM --> POLL : rearm_completed() & !capture_submitted & !rd->err
+    REARM --> Failed : rearm_completed() & rd->err -> session_error()
+    REARM --> RECOVER : rearm_completed(error) -> escalate (preserves capture_submitted)
 
     state RECOVER {
         [*] --> RECOVER_SESSION : 0x60 -> 0xAE -> 0x32 -> 0x34x2 -> 150ms -> 0xAE -> 0x32
-        RECOVER_SESSION --> [*] : Preserves TLS & cached background
+        RECOVER_SESSION --> [*] : Preserves TLS, cached BG & capture_submitted
     }
 
-    RECOVER --> [*] : RECOVER OK && saved image -> image_captured
-    RECOVER --> POLL : RECOVER OK && no image -> retry_scan / next touch
-    RECOVER --> Failed : capture_error present or RECOVER failed
+    RECOVER --> [*] : RECOVER OK && capture_submitted -> finger_status(FALSE)
+    RECOVER --> POLL : RECOVER OK && !capture_submitted && !capture_error
+    RECOVER --> Failed : capture_error present or RECOVER failed -> session_error()
 
     state DEINIT {
         [*] --> DEINIT_POWER : Completes immediately (no 0xD6 power-off)
@@ -149,12 +154,23 @@ stateDiagram-v2
 
 ### Key `CAP` / `REARM` / `RECOVER` Mechanics
 
+- **Overlapped early submission (`gm168_submit_capture()`)**:
+  - `capture_after_settle_cb()` does **not** call `fpi_image_device_report_finger_status(TRUE)` after the settle delay (`GM168_CAPTURE_SETTLE_MS = 150` and `GM168_WAIT_LIFT_POLL_DEFAULT_MS = 150` remain unchanged).
+  - Once `capture_completed()` obtains a usable frame (`quality > 0.0f`), `gm168_submit_capture()` sets `self->capture_submitted = TRUE`, calls `report_finger_status(TRUE)` and `fpi_image_device_image_captured()`, and then launches `start_rearm_ssm()`.
+  - Because `image_captured()` runs before `REARM`, `GTask` SIGFM extraction and verify/identify matching can complete concurrently while `REARM` runs the capacitive discharge (`0x34`) and `wait_lift` loop. Responsiveness gains come from this overlap rather than shortening settle or lift-poll timers.
+  - `dev_change_state(FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF)` only clears `self->active_state = FALSE` and does **not** report finger-off (reporting it there would deactivate and cancel the active `REARM` SSM). Only `rearm_completed()` or `recover_completed()` clears `self->capture_submitted` and emits `report_finger_status(FALSE)`.
+- **Zero-quality discard (no false-FDT retries)**:
+  - If both dual frames have `quality == 0.0f` (or a mid-retry error fallback has `quality == 0.0f`), `capture_completed()` unrefs and discards the `FpImage`, keeps `self->capture_submitted == FALSE`, and runs `start_rearm_ssm(self, NULL)` without calling `report_finger_status(TRUE)`, `image_captured()`, or `retry_scan()`. No libfprint retry or verify attempt is consumed, and `rearm_completed()` resumes `start_polling()` since the core never left `AWAIT_FINGER_ON`.
+  - Capture errors without a usable frame still pass `rd->err` through `REARM`/`RECOVER` and terminate with `fpi_image_device_session_error()`.
 - **Budget-bounded `CAP_RX`**: each `CAP_RX` USB read uses `min(GM168_USB_RX_SHORT_TIMEOUT_MS, max(50, GM168_CAPTURE_BUDGET_MS - elapsed_ms))` (`1000 ms` max, `600 ms` total touch budget, `50 ms` floor) so a quiet sensor cannot stall past the budget.
 - **Re-trigger on consecutive timeouts**: after `GM168_CAP_RX_RETRIG_AFTER` (`2`) consecutive `CAP_RX` timeouts, `capture_rx_cb()` jumps back to `CAP_TRIG` once in case the sensor dropped the scan trigger.
 - **1-byte framing resync**: in `CAP_PROCESS`, encountering an unknown packet type byte drops **only 1 byte** from `self->stitch_buf` rather than wiping the whole buffer, preserving trailing valid packets.
 - **TLS record drain and packet ownership**: after each `B0`/`B2` feed, `gm168_tls_drain()` reads the first record with the bounded socketpair wait and then drains all already-available records without sleeping. The consumed wire packet is removed from `stitch_buf` before `CAP` can complete, while any unprocessed tail remains buffered.
 - **Background short-read progress**: every non-empty `INIT_BG_RX` transfer advances to `INIT_BG_PROCESS`; a residual wire tail smaller than `10564` bytes can therefore complete a partially decoded frame. A non-timeout USB error skips BG and enters the normal rearm chain instead of re-listening until the watchdog.
-- **Recovery completion contract**: a recoverable `REARM` failure preserves an already-captured `rd->img` in `RecoverData`. Successful `RECOVER` submits that image, reports a saved capture error, or calls `retry_scan()` for an interrupted quality retry. It never returns directly to polling with the core stranded in `CAPTURE`.
+- **Recovery completion contract**: `REARM` and `RECOVER` no longer store an `FpImage` in `RearmData` or `RecoverData`; instead, `RECOVER` preserves `self->capture_submitted` (and any saved `rd->capture_error`) across escalation. If `RECOVER` fails, `recover_completed()` surfaces `fpi_image_device_session_error()` (superseding any older capture error). If `RECOVER` succeeds:
+  - if `rd->capture_error` is present, it surfaces `fpi_image_device_session_error()`;
+  - else if `self->capture_submitted` is `TRUE` (usable frame already submitted before `REARM`), it clears `capture_submitted` and reports `fpi_image_device_report_finger_status(img_dev, FALSE)`;
+  - else (`!capture_submitted` and no `capture_error`, such as a discarded zero-quality touch or an unsubmitted retry), the core is still in `AWAIT_FINGER_ON`, so `recover_completed()` resumes `start_polling()` directly without emitting a libfprint retry.
 - **Terminal USB/cancellation handling**: `FP_DEVICE_ERROR_REMOVED` bypasses fallback and recovery, and `G_IO_ERROR_CANCELLED` exits quietly without escalating to `RECOVER`. A recovery failure takes precedence over any older saved capture error.
 - **Bounded `wait_lift_cb()`**: polls `EP_IN` with `gm168_wait_lift_poll_ms()` (`150 ms` default, configurable `50..1000 ms` via `$GM168_WAIT_LIFT_POLL_MS`).
   - If the finger stays on or quick-taps during `wait_lift`, FDT fires (`echo=0x32, status=0x02`) and sets `rd->consumed_touch = TRUE`. On the subsequent timeout, `wait_lift_cb()` jumps back to `REARM_32` to re-arm FDT (otherwise `start_polling()` would listen on a disarmed FDT).
@@ -202,12 +218,12 @@ Any other status byte fails the SSM immediately (`FP_DEVICE_ERROR_PROTO`).
 ### Generation & Cancellation Guards
 
 - **Monotonic generation counter (`self->generation`)**:
-  - Incremented at the start of both `dev_activate()` and `dev_deactivate()`.
+  - Incremented at the start of `dev_activate()` and inside `gm168_dev_deactivate_now()`. A cancellation-deferred `dev_deactivate()` during active `REARM` deliberately preserves the current generation until `rearm_completed()`.
   - Every `FpiSsm` stores `generation` in `SsmData`; `RearmData` and `RecoverData` embed that header as their first `base` field, so `gm168_ssm_is_current()` accesses a real common subobject rather than aliasing unrelated struct types. `poll_cb()` and `capture_after_settle_cb()` receive `self->generation` via `user_data`.
   - `gm168_ssm_is_current()` and `gm168_ssm_callback_guard()` check `data->generation == self->generation` at the top of every `*_run_state` and USB callback; stale callbacks free any transfer error and fail with `G_IO_ERROR_CANCELLED`.
   - `gm168_activate_complete()` checks `self->activation_pending && generation == self->activation_generation` so deactivation mid-init cannot double-complete activation.
 - **Shared `io_cancellable`**:
-  - Created fresh in `dev_activate()`, wired to `fpi_device_get_cancellable()` via `action_cancelled_cb()`, and cancelled + unrefed in `dev_deactivate()`, aborting any pending `EP_IN`/`EP_OUT` transfer immediately.
+  - Created fresh in `dev_activate()`, wired to `fpi_device_get_cancellable()` via `action_cancelled_cb()`, and cancelled + unrefed in `gm168_dev_deactivate_now()`, aborting any pending `EP_IN`/`EP_OUT` transfer. The sole exception is `rearm_active && !device_dead`: both the callback and deferred deactivation preserve it until FDT restoration terminates.
 - **USB Error Classification (`driver/gm168_usb_errors.h`)**:
   - `gm168_classify_usb_error()` categorizes `GError` into `OTHER`, `CANCELLED`, `TIMEOUT`, `NO_DEVICE`, and `IO`.
   - `gm168_handle_fatal_usb_error()` consumes `NO_DEVICE` across all SSM USB callbacks, sets `self->device_dead = TRUE`, and emits `FP_DEVICE_ERROR_REMOVED`. Action/transfer guards read `device_dead` to suppress new polling, commands, rearm, and recovery; a later activation cannot reuse the stale TLS fast path after removal.
@@ -218,10 +234,11 @@ The `FpImageDevice` core adds a lifecycle barrier around the existing GM168 USB 
 
 - A non-cancelling `fpi_image_device_deactivate()` call made while `finger_present` or `minutiae_scan_active` (including SIGFM extraction) is true sets `action_pending_deactivation` and returns without entering the driver's `DEINIT` SSM.
 - The finger-off path and the extraction-completion callback retry the pending request. `DEINIT` starts only when both conditions are false, and the public action completes after normal deactivation completion.
-- Final enrollment can therefore report its last stage without deactivating underneath an active frame callback; identify/verify can finish matching before teardown.
-- Cancellation uses `cancelling = TRUE`, clears the pending flag, and immediately follows the normal generation/cancellation path. USB removal and fatal errors are never delayed by this barrier.
+- Final enrollment can therefore report its last stage without deactivating underneath an active frame callback; identify/verify can report a match during `REARM`/`wait_lift` while deferring `DEINIT` until finger-off and extraction completion.
+- After `*_finish()`, a late extraction callback checks for a fatal `action_error`, `DEACTIVATING`, or `INACTIVE` before producing enroll progress or identify results. It completes the pending action instead, while `fp_image_device_enroll_maybe_await_finger_on()` additionally requires an active device in `IDLE`; a fatal `REARM`/`RECOVER` therefore cannot trigger an invalid `INACTIVE → AWAIT_FINGER_ON` transition or leave enrollment hanging.
+- Cancellation uses `cancelling = TRUE` and clears the core pending flag. Outside active `REARM`, the driver immediately follows the normal generation/cancellation path. If `rearm_active && !device_dead`, `action_cancelled_cb()` preserves `io_cancellable`, and `dev_deactivate()` sets `deinit_pending` without incrementing generation or setting `self->deactivating`; `rearm_completed()` then runs `gm168_dev_deactivate_now()` on every success, error, or watchdog exit. This drains FDT restoration for the next fast path while remaining bounded by `GM168_REARM_DEADLINE_MS`. USB removal, capture, and `RECOVER` always cancel immediately.
 
-The GM168 driver still performs its own `REARM`/lift-wait before submitting frames. The core barrier is defence in depth for core/driver ordering, not a replacement for `wait_lift_cb()`, `gm168_ssm_is_current()`, or `io_cancellable`.
+Because the GM168 driver submits usable frames before `REARM`/`wait_lift`, the core barrier ensures a match or final enrollment result completed during `REARM` does not deactivate underneath that active SSM—teardown waits until `rearm_completed()` / `recover_completed()` emits `finger_status(FALSE)` and SIFT extraction is idle. It complements—but does not replace—`wait_lift_cb()`, `gm168_ssm_is_current()`, or `io_cancellable`. On `FPI_DEVICE_ACTION_IDENTIFY`, an empty (`NULL` or zero-length) gallery also short-circuits in `fp_image_device_start_capture_action()` with an immediate no-match report and completion without activating the sensor or invoking any SSM.
 
 ### Timing and Deadline Contract (`driver/gm168_timeouts.h`)
 
@@ -246,7 +263,7 @@ The GM168 driver still performs its own `REARM`/lift-wait before submitting fram
 | `GM168_RECOVER_DEADLINE_MS` | `5000 ms` | Wall-clock deadline for `RECOVER` SSM |
 | `GM168_DEINIT_DEADLINE_MS` | `3000 ms` | Wall-clock deadline for `DEINIT` SSM |
 
-Compile-time `_Static_assert` checks in both `driver/gm168_timeouts.h` and `tests/test_timeouts.c` prevent silent drift across these invariants.
+Compile-time `_Static_assert` checks in both `driver/gm168_timeouts.h` and `tests/test_timeouts.c` prevent silent drift across these invariants. The same standalone test executes the `gm168_lifecycle.h` predicate matrix for deferred `REARM` draining versus immediate cancellation.
 
 ## Fast Path Across Enroll Stages
 

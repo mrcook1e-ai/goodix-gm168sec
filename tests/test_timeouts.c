@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <stdio.h>
+#include "gm168_lifecycle.h"
 #include "gm168_timeouts.h"
 
 _Static_assert (GM168_USB_RX_TIMEOUT_MS       == 2000, "RX default");
@@ -18,6 +19,14 @@ _Static_assert (GM168_TLS_RETRY_LIMIT         == 60,   "TLS retries");
 int
 main (void)
 {
-    puts ("gm168 timeout contract: OK");
+    /* Only a live REARM with the device still present may delay cancellation.
+     * This exact predicate gates both io_cancellable and deferred DEINIT. */
+    if (!gm168_should_drain_rearm (1, 0) ||
+        gm168_should_drain_rearm (0, 0) ||
+        gm168_should_drain_rearm (1, 1) ||
+        gm168_should_drain_rearm (0, 1))
+        return 1;
+
+    puts ("gm168 timeout/lifecycle contract: OK");
     return 0;
 }

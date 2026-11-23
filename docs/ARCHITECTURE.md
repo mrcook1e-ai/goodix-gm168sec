@@ -22,7 +22,7 @@ flowchart TB
         PROTO["Wire Framing & Payloads<br/>(driver/goodix_proto.{c,h})"]
         TLS["TLS 1.2 PSK Server<br/>(driver/goodix_tls.{c,h}, OpenSSL 3)"]
         RECOV["Read-Only PSK Recovery<br/>(driver/gm168_psk_recovery.{c,h})"]
-        INFRA["Timeouts / USB Errors / Trace / Log<br/>(gm168_timeouts.h, gm168_usb_errors.h,<br/>gm168_trace.h, gm168_log.{c,h})"]
+        INFRA["Lifecycle / Timeouts / USB Errors / Trace / Log<br/>(gm168_lifecycle.h, gm168_timeouts.h, gm168_usb_errors.h,<br/>gm168_trace.h, gm168_log.{c,h})"]
     end
 
     subgraph ExternalBoundaries["External System Boundaries"]
@@ -53,12 +53,12 @@ flowchart TB
 
 | Component | Source Files | Responsibility | External Dependencies |
 |---|---|---|---|
-| **Driver Core** | `driver/goodix_gm168.c`, `driver/gm168_frame_layout.h` | `FpImageDevice` lifecycle, `INIT`/`CAP`/`REARM`/`RECOVER`/`DEINIT` SSMs, polling, packed frame decoding/layout, preprocessing, quality gate, dual capture, state file loading | GLib, `GUsb`, `FpiSsm`, OpenSSL `OPENSSL_cleanse`/`CRYPTO_memcmp` |
+| **Driver Core** | `driver/goodix_gm168.c`, `driver/gm168_frame_layout.h` | `FpImageDevice` lifecycle, `INIT`/`CAP`/`REARM`/`RECOVER`/`DEINIT` SSMs, polling, packed frame decoding/layout, preprocessing, quality gate, dual capture, early capture submission overlapped with `REARM`, zero-quality false-touch drop, state file loading | GLib, `GUsb`, `FpiSsm`, OpenSSL `OPENSSL_cleanse`/`CRYPTO_memcmp` |
 | **Protocol Codec** | `driver/goodix_proto.c`, `driver/goodix_proto.h` | `0xA0`/`0xB0`/`0xB2` packet encode/decode, header & body checksums, touch packet matcher, static Windows-captured register/FDT payloads, runtime `goodix_gm168_psk[32]` buffer | GLib |
 | **TLS Adapter** | `driver/goodix_tls.c`, `driver/goodix_tls.h` | OpenSSL 3 TLS 1.2 server (`PSK-AES128-CBC-SHA256`), `AF_UNIX` `socketpair` bridge, handshake thread, `GMainContext` completion source | OpenSSL 3 (`>= 3.0, < 4.0`), POSIX sockets, `pthread` |
 | **PSK Recovery** | `driver/gm168_psk_recovery.c`, `driver/gm168_psk_recovery.h` | Pure buffer-only DPAPI v1 total-length parser, `0xbb010003` TLV validator, `SecWhiteEncrypt` root/IV/AES-128-CBC/HMAC-SHA256 decrypt, `0xE4` reply validators | OpenSSL 3 (`EVP`, `HMAC`, `CRYPTO_memcmp`, `OPENSSL_cleanse`), GLib |
-| **Support Headers** | `driver/gm168_timeouts.h`, `driver/gm168_usb_errors.h`, `driver/gm168_trace.h`, `driver/gm168_log.{c,h}` | Compile-time-asserted timing/deadline constants, USB error classification, opt-in `[TRACE]` measurements, opt-in `$GM168_LOG_DIR` session text logs | GLib, `GUsb` |
-| **SIGFM Subsystem** | `patches/libfprint-v1.94.100-integration.patch` (`libfprint/sigfm/*`, `fpi-image.c`, `fpi-print.c`, `fp-print.c`, `fpi-image-device.c`) | SIFT keypoint extraction, tiled coverage, reciprocal Lowe filtering + RANSAC partial-affine verification, deferred deactivation, `SGFM` v1 serialization, `FP3` integration, enroll anti-dup, verify auto-retry | OpenCV 4 (`core`, `features2d`, `calib3d`), GLib `GTask` |
+| **Support Headers** | `driver/gm168_lifecycle.h`, `driver/gm168_timeouts.h`, `driver/gm168_usb_errors.h`, `driver/gm168_trace.h`, `driver/gm168_log.{c,h}` | Cancellation-drain predicate, compile-time-asserted timing/deadline constants, USB error classification, opt-in `[TRACE]` measurements, opt-in `$GM168_LOG_DIR` session text logs | GLib, `GUsb` |
+| **SIGFM Subsystem** | `patches/libfprint-v1.94.100-integration.patch` (`libfprint/sigfm/*`, `fpi-image.c`, `fpi-print.c`, `fp-print.c`, `fp-image-device.c`, `fpi-image-device.c`) | SIFT keypoint extraction, tiled coverage, reciprocal Lowe filtering + RANSAC partial-affine verification, deferred deactivation, empty-gallery `IDENTIFY` short-circuit, `SGFM` v1 serialization, `FP3` integration, enroll anti-dup, verify auto-retry | OpenCV 4 (`core`, `features2d`, `calib3d`), GLib `GTask` |
 
 ## Activation-to-Verify Data Flow
 
@@ -106,16 +106,36 @@ sequenceDiagram
     Core->>Drv: dev_change_state(AWAIT_FINGER_ON) -> start_polling()
     User->>Usb: Touch capacitive sensor
     Usb-->>Drv: A0 touch packet (echo=0x32, status=0x02)
-    Drv->>Drv: Wait capture settle delay (150ms default)
-    Drv->>Core: fpi_image_device_report_finger_status(TRUE)
+    Drv->>Drv: Wait capture settle delay (150ms default, unchanged)
     Drv->>Usb: CAP dual capture (#1 + #2 via 0x20 + B2 decrypt)
     Drv->>Drv: Decode 80x64 12-bit -> preprocess -> 2x resize (160x128) -> pick best
-    Drv->>Usb: REARM (0x34 x2 -> 150ms -> 0xAE -> 0x32 -> wait_lift)
-    Drv->>Core: report_finger_status(FALSE) + fpi_image_device_image_captured(FpImage)
-    Core->>Core: GTask worker: normalize flags + sigfm_extract() + coverage
-    Core->>Core: Quality gate + reciprocal/RANSAC match (threshold >= 8)<br/>or enroll anti-dup check
-    Core->>Core: Defer teardown until finger-off + extraction completion
+    alt Usable frame (quality > 0)
+        Drv->>Core: gm168_submit_capture(): report_finger_status(TRUE) + image_captured(FpImage)
+        Core->>Drv: dev_change_state(AWAIT_FINGER_OFF) (holds finger-off until REARM ends)
+        par Overlapped sensor re-arm & SIGFM processing
+            Drv->>Usb: REARM (0x34 x2 -> 150ms -> 0xAE -> 0x32 -> wait_lift 150ms default)
+        and
+            Core->>Core: GTask worker: normalize flags + sigfm_extract() + coverage
+            Core->>Core: Quality gate + reciprocal/RANSAC match (threshold >= 8)<br/>or enroll anti-dup check (may report match before lift)
+        end
+        alt Client cancels after early match while REARM is active
+            Drv->>Drv: deinit_pending = TRUE (preserve generation + io_cancellable)
+            Drv->>Usb: Drain REARM through terminal state (6000ms watchdog bound)
+            Drv->>Core: rearm_completed() -> gm168_dev_deactivate_now() -> DEINIT
+        else Normal completion
+            Drv->>Core: rearm_completed() / recover_completed(): report_finger_status(FALSE)
+            Core->>Drv: Complete deferred deactivation (DEINIT) or next enroll stage
+        end
+    else Both dual frames quality == 0 (or zero-quality fallback)
+        Drv->>Drv: Discard FpImage (capture_submitted = FALSE, no libfprint retry)
+        Drv->>Usb: REARM (0x34 x2 -> 150ms -> 0xAE -> 0x32 -> wait_lift)
+        Drv->>Drv: rearm_completed() -> resume start_polling()
+    end
 ```
+
+> **Empty-Gallery `IDENTIFY` Shortcut (`fp_image_device_start_capture_action`)**
+>
+> For `FPI_DEVICE_ACTION_IDENTIFY`, if the gallery is `NULL` or empty (`len == 0`) after template-type checks, `FpImageDevice` resets any pending verify retry state, immediately calls `fpi_device_identify_report(..., NULL, NULL, NULL)` and `fpi_device_identify_complete(..., NULL)`, and returns without invoking `dev_activate()`, `dev_change_state()`, or SIGFM retries. An owner-run clean live test completed `20/20` enrollment, observed the empty-gallery shortcut, and completed three cancellation-drain branches without `stale device operation` or failed `REARM`/`DEINIT`. A separate displaced/angled-finger sequence still produced low-score no-matches, so matching coverage and retry UX remain open; no population accuracy or latency guarantee is inferred.
 
 ## Threading and GLib Owner Context
 
@@ -146,7 +166,7 @@ The driver preserves strict thread confinement around `libfprint`'s single-threa
 - **Reassembly & Framing**:
   - `self->stitch_buf` accumulates raw `EP_IN` chunks across short USB reads; `CAP_PROCESS` and `INIT_BG_PROCESS` parse `A0`/`B0`/`B2` packets from the buffer head, feeding decrypted TLS payloads into `self->img_buf`.
 - **Shared Cancellation & Error Taxonomy**:
-  - A single `self->io_cancellable` (`GCancellable`) is created per `dev_activate()`, connected to `libfprint`'s `action_cancellable`, and cancelled in `dev_deactivate()` to abort in-flight USB transfers in milliseconds.
+  - A single `self->io_cancellable` (`GCancellable`) is created per `dev_activate()` and connected to `libfprint`'s `action_cancellable`. It is normally cancelled in `gm168_dev_deactivate_now()` to abort in-flight USB transfers in milliseconds. The sole exception is `rearm_active && !device_dead`: cancellation/deactivation preserves it until `REARM` reaches a terminal state, then deferred `DEINIT` cancels and releases it.
   - `gm168_classify_usb_error()` (`driver/gm168_usb_errors.h`) maps USB failures into `CANCELLED`, `TIMEOUT`, `NO_DEVICE`, `IO`, and `OTHER`; `NO_DEVICE` marks `self->device_dead = TRUE` and propagates `FP_DEVICE_ERROR_REMOVED`.
 
 ## Private State Directory & Persistence Boundary

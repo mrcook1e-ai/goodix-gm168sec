@@ -6,10 +6,10 @@ This repository is a public source overlay for the experimental **Goodix GM168SE
 
 Keep changes strictly separated by responsibility:
 
-- `driver/` — Canonical C11 driver sources and headers (`goodix_gm168.c`, `goodix_proto.{c,h}`, `goodix_tls.{c,h}`, `gm168_psk_recovery.{c,h}`, `gm168_frame_layout.h`, `gm168_timeouts.h`, `gm168_usb_errors.h`, `gm168_trace.h`, `gm168_log.{c,h}`). Copied directly into `libfprint/drivers/goodix_gm168/` by `tools/apply-overlay.sh`.
+- `driver/` — Canonical C11 driver sources and headers (`goodix_gm168.c`, `goodix_proto.{c,h}`, `goodix_tls.{c,h}`, `gm168_psk_recovery.{c,h}`, `gm168_frame_layout.h`, `gm168_lifecycle.h`, `gm168_timeouts.h`, `gm168_usb_errors.h`, `gm168_trace.h`, `gm168_log.{c,h}`). Copied directly into `libfprint/drivers/goodix_gm168/` by `tools/apply-overlay.sh`.
 - `patches/libfprint-v1.94.100-integration.patch` — Integration patch against pinned upstream `libfprint v1.94.100` (`80a4b5ec612892c5c056c48dddaa561452cf37ec`). Houses `libfprint/sigfm/*`, core `FPI_PRINT_SIGFM` hooks, `tests/test-fpi-sigfm.c`, `tests/test-goodix-gm168-frame-layout.c`, OpenSSL 3 build policy (`>= 3.0, < 4.0`), `libfprint/meson.build` / `tests/meson.build` driver wiring, and `fprint-list-udev-hwdb.c` allowlist cleanup.
 - `tools/apply-overlay.sh` — Enforces clean `v1.94.100` target checkout, copies `driver/*` and `tests/test-goodix-gm168-psk-recovery.c`, checks and applies `patches/libfprint-v1.94.100-integration.patch`.
-- `tests/` — Standalone compile-time timeout contract check (`tests/test_timeouts.c`). PSK recovery tests (`tests/test-goodix-gm168-psk-recovery.c`), SIGFM tests (`tests/test-fpi-sigfm.c`, `libfprint/sigfm/tests.cpp`), and the packed-frame layout test (`tests/test-goodix-gm168-frame-layout.c`) run inside the patched `libfprint` build tree.
+- `tests/` — Standalone compile-time timeout contract plus runtime cancellation-lifecycle predicate check (`tests/test_timeouts.c`). PSK recovery tests (`tests/test-goodix-gm168-psk-recovery.c`), SIGFM tests (`tests/test-fpi-sigfm.c`, `libfprint/sigfm/tests.cpp`), and the packed-frame layout test (`tests/test-goodix-gm168-frame-layout.c`) run inside the patched `libfprint` build tree.
 - `packaging/` — Udev `uaccess` rule (`packaging/udev/70-goodix-gm168.rules`) and experimental Fedora RPM spec (`packaging/fedora/libfprint-goodix-gm168.spec`).
 - `docs/` & root policies (`README.md`, `INSTALL.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`) — Curated technical documentation and safety boundaries.
 
@@ -58,7 +58,7 @@ meson test -C ./build \
 # Full meson suite (expect all enabled targets OK; disabled drivers skipped)
 meson test -C ./build --print-errorlogs
 
-# Standalone timeout _Static_assert check
+# Standalone timeout _Static_assert + cancellation-lifecycle contract check
 cc -std=c11 -Wall -Wextra -Werror -Idriver tests/test_timeouts.c -o /tmp/test_timeouts
 /tmp/test_timeouts
 rm -f /tmp/test_timeouts

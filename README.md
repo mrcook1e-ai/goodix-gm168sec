@@ -44,7 +44,11 @@ matching and read-only in-memory PSK recovery.
 - **Matching pipeline**: `FPI_PRINT_SIGFM` (OpenCV SIFT + reciprocal matching +
   RANSAC affine check) instead of NBIS, using 20 enrollment stages with
   anti-duplicate filtering, a keypoint/coverage quality gate, deferred teardown,
-  bounded verify auto-retry, and a 2x bilinear upscale to `160x128`.
+  bounded cancellation-safe `REARM` draining, bounded verify auto-retry, early usable-frame submission overlapped with
+  sensor `REARM`/`wait_lift` (while retaining `150 ms` settle and `150 ms`
+  default `wait_lift` intervals), zero-quality false-touch drop without
+  consuming a retry, immediate no-match completion on empty-gallery `identify`,
+  and a 2x bilinear upscale to `160x128`.
 - **Background & calibration**: dynamic 5-frame dark background capture and
   subtraction works out of the box without per-device calibration files.
   Optional per-device Windows calibration files (`calib_windows.dat`,
@@ -54,9 +58,14 @@ matching and read-only in-memory PSK recovery.
   false accept / false reject behavior. Cross-device compatibility, other
   firmware revisions, hotplug behavior, and suspend/resume lifecycle are not
   broadly validated and should not be assumed production-ready. Always keep a
-  password authentication fallback configured. The latest reciprocal/quality/
-  lifecycle changes have offline synthetic proof only; earlier live results do
-  not validate this revision.
+  password authentication fallback configured. An owner-run clean live test of
+  the revised pipeline completed `right-thumb` enrollment (`20/20`), recorded
+  five `verify-match` events and three complete cancellation-safe `REARM` drains,
+  with no `stale device operation` or failed `REARM`/`DEINIT`. A separate sequence
+  of displaced/angled placements still produced `verify-no-match` despite
+  high-quality frames and low SIGFM scores; matching coverage and retry UX remain
+  follow-up work. These limited observations are not population FAR/FRR or
+  throughput claims.
 
 ## AI-assisted development and "as is" notice
 
@@ -183,7 +192,8 @@ meson test -C build \
 ```
 
 This exercises pinned cryptographic vectors, malformed DPAPI/TLV inputs, SIGFM
-serialization/matching/reciprocal/quality behavior, packed-frame layout, and
+serialization/matching/reciprocal/quality behavior, empty-gallery `identify`
+and match-before-finger-off lifecycle ordering, packed-frame layout, and
 negative controls without accessing a sensor. See
 [`docs/TESTING.md`](docs/TESTING.md) for Valgrind and the offline-vs-live proof
 boundary.
