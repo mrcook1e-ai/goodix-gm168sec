@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">GM168SEC OLED CLI social preview</title>
+  <desc id="desc">Experimental libfprint driver for the Goodix GM168SEC, presented in a monochrome command-line style.</desc>
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M40 0H0V40" fill="none" stroke="#FFFFFF" stroke-opacity="0.018"/>
+  </pattern>
+  <rect width="1280" height="640" fill="#000000"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1278" height="638" fill="none" stroke="#242424" stroke-width="2"/>
+  <path d="M1 76H1279" stroke="#1D1D1D"/>
+  <text x="80" y="49" fill="#30D158" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="16">$</text>
+  <text x="100" y="49" fill="#A3A3A3" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="16">goodix-gm168sec --info</text>
+  <circle cx="1138" cy="46" r="4" fill="#FF453A"/>
+  <circle cx="1156" cy="46" r="4" fill="#FFCC00"/>
+  <circle cx="1174" cy="46" r="4" fill="#30D158"/>
+  <g opacity="0.45" transform="translate(1000 122) scale(4.4)" fill="none" stroke="#171717" stroke-width="1.2" stroke-linecap="square">
+    <path d="M27 64V43C27 30.3 36.4 20 48 20C59.6 20 69 30.3 69 43V49"/>
+    <path d="M37 65V44C37 36.4 41.9 30 48.5 30C55.1 30 60 36.4 60 44V55"/>
+    <path d="M47 66V45C47 42.2 48.2 40 50 40C51.8 40 53 42.2 53 45V50"/>
+  </g>
+  <g transform="translate(80 108) scale(1.8)">
+    <rect x="1" y="1" width="94" height="94" rx="10" fill="#050505" stroke="#2A2A2A" stroke-width="1.5"/>
+    <path d="M27 64V43C27 30.3 36.4 20 48 20C59.6 20 69 30.3 69 43V49" fill="none" stroke="#F5F5F5" stroke-width="4.5" stroke-linecap="square"/>
+    <path d="M37 65V44C37 36.4 41.9 30 48.5 30C55.1 30 60 36.4 60 44V55" fill="none" stroke="#A3A3A3" stroke-width="4.5" stroke-linecap="square"/>
+    <path d="M47 66V45C47 42.2 48.2 40 50 40C51.8 40 53 42.2 53 45V50" fill="none" stroke="#737373" stroke-width="4.5" stroke-linecap="square"/>
+    <circle cx="69" cy="49" r="3" fill="#FF453A"/>
+    <circle cx="60" cy="55" r="3" fill="#FFCC00"/>
+    <circle cx="53" cy="50" r="3" fill="#30D158"/>
+    <path d="M24 76L29 81L24 86M35 81H50" fill="none" stroke="#A3A3A3" stroke-width="1.8"/>
+    <rect x="54" y="78" width="7" height="6" fill="#F5F5F5"/>
+  </g>
+  <text x="298" y="136" fill="#737373" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="17" letter-spacing="2">GOODIX / 27C6:589A</text>
+  <text x="290" y="228" fill="#F5F5F5" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="86" font-weight="600" letter-spacing="-3">GM168SEC</text>
+  <text x="298" y="278" fill="#A3A3A3" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="20">LIBFPRINT :: SIGFM :: TLS-PSK</text>
+  <path d="M80 336H1200" stroke="#2A2A2A"/>
+  <path d="M80 336H160" stroke="#F5F5F5" stroke-width="2"/>
+  <text x="80" y="414" fill="#F5F5F5" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="32">Experimental Linux driver for Goodix GM168SEC.</text>
+  <text x="80" y="464" fill="#A3A3A3" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="20">open_protocol :: read_only_recovery :: sigfm_matching</text>
+  <g transform="translate(80 526)">
+    <rect width="142" height="38" rx="3" fill="#050505" stroke="#2A2A2A"/>
+    <circle cx="20" cy="19" r="3.5" fill="#30D158"/>
+    <text x="34" y="25" fill="#D4D4D4" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="14">27C6:589A</text>
+  </g>
+  <rect x="248" y="541" width="6" height="6" fill="#FFCC00"/>
+  <text x="264" y="549" fill="#FFCC00" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="13" letter-spacing="1">DEVELOPER PREVIEW</text>
+  <text x="1200" y="549" text-anchor="end" fill="#737373" font-family="JetBrains Mono, DejaVu Sans Mono, monospace" font-size="13">EN / RU  ·  LGPL-2.1-OR-LATER</text>
+</svg>

@@ -26,6 +26,8 @@ fdt_thresholds*
 *.pgm
 *.ppm
 *.png
+# Sole exception: reviewed synthetic brand artwork, never biometric captures.
+!assets/brand/social-preview.png
 *.jpg
 *.jpeg
 *.bmp

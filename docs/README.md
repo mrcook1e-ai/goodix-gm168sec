@@ -1,4 +1,13 @@
-# Documentation Hub (`goodix-gm168sec`)
+<p>
+  <img src="../assets/brand/mark.svg" alt="" width="72">
+</p>
+
+<h1>Documentation Hub</h1>
+
+<p>
+  <strong>English</strong> · <a href="ru/README.md">Русский</a><br>
+  <a href="../README.md">Project</a> · <a href="BRANDING.md">Brand</a>
+</p>
 
 This directory documents the **Goodix GM168SEC** (`27c6:589a`) experimental
 [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint) overlay driver,
@@ -51,6 +60,15 @@ recovery subsystem, and the project's clean-room engineering boundaries.
 | [`DEVELOPMENT.md`](DEVELOPMENT.md) | Overlay maintenance, integration patch regeneration excluding `driver/`, diagnostic environment variables, and upstream blockers | `tools/apply-overlay.sh`, `patches/libfprint-v1.94.100-integration.patch` |
 | [`SECURITY.md`](SECURITY.md) | Runtime `/etc/goodix-gm168` ownership checks, PSK lifecycle rules, sensitive diagnostic artifact bans, and advisory process | `driver/goodix_gm168.c`, `driver/gm168_log.c` |
 | [`FAQ.md`](FAQ.md) | Troubleshooting missing/stale PSKs, Windows dual-boot rotation, optional calibration, Fedora 45 OpenSSL 3/TLS errors, template incompatibility, and safe bug reporting | [`SECURITY.md`](SECURITY.md), [`TESTING.md`](TESTING.md), [`PSK-RECOVERY.md`](PSK-RECOVERY.md) |
+
+### Design & Localization
+
+- [`BRANDING.md`](BRANDING.md) — Secure Signal assets, color and typography rules,
+  bilingual information architecture, and the core EN/RU terminology.
+- [`README.ru.md`](../README.ru.md) — Russian project overview and entry page.
+- [`ru/README.md`](ru/README.md) — Russian documentation hub with links to the
+  canonical English technical guides.
+- [`ru/BRANDING.md`](ru/BRANDING.md) — Russian Secure Signal brand guide.
 
 ## Cross-Cutting Safety Principles
 

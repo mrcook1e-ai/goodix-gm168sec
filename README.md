@@ -1,37 +1,26 @@
-<h1 align="center">goodix-gm168sec</h1>
+<h1>
+  <img src="assets/brand/header.svg" alt="GM168SEC — Goodix libfprint driver overlay" width="100%">
+</h1>
 
-<p align="center">
-  <strong>Goodix GM168SEC · Linux · libfprint</strong><br>
-  A public source overlay for the <code>27c6:589a</code> capacitive fingerprint reader.
+<p>
+  <strong>English</strong> · <a href="README.ru.md">Русский</a>
 </p>
 
-<p align="center">
-  <a href="https://readme-typing-svg.demolab.com">
-    <img src="https://readme-typing-svg.demolab.com/?font=Fira+Code&amp;size=18&amp;pause=1200&amp;color=3B82F6&amp;center=true&amp;vCenter=true&amp;width=720&amp;lines=USB+protocol+and+Binary+Ninja;TLS-PSK+and+read-only+recovery;SIFT+%2B+RANSAC+with+SIGFM" alt="USB protocol, TLS-PSK recovery, and SIGFM matching">
-  </a>
+<p>
+  Experimental <a href="https://gitlab.freedesktop.org/libfprint/libfprint">libfprint</a>
+  driver for the <strong>Goodix GM168SEC</strong> capacitive fingerprint sensor,<br>
+  with SIGFM matching and read-only in-memory PSK recovery.
 </p>
 
-<p align="center">
-  <a href="https://github.com/mrcook1e-ai/goodix-gm168sec/actions/workflows/ci.yml"><img src="https://github.com/mrcook1e-ai/goodix-gm168sec/actions/workflows/ci.yml/badge.svg" alt="CI: Ubuntu 24.04 &amp; Fedora 45"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-LGPL--2.1--or--later-blue" alt="License: LGPL-2.1-or-later"></a>
-  <a href="patches/libfprint-v1.94.100-integration.patch"><img src="https://img.shields.io/badge/libfprint-v1.94.100-4b5563" alt="libfprint v1.94.100"></a>
-  <a href="INSTALL.md"><img src="https://img.shields.io/badge/OpenSSL-3.x-721412?logo=openssl" alt="OpenSSL 3"></a>
-  <a href="INSTALL.md"><img src="https://img.shields.io/badge/Fedora-45_tested-51a2da?logo=fedora&amp;logoColor=white" alt="Fedora 45 tested"></a>
-  <a href="INSTALL.md"><img src="https://img.shields.io/badge/Ubuntu-24.04_tested-E95420?logo=ubuntu&amp;logoColor=white" alt="Ubuntu 24.04 tested"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/status-developer_preview-orange" alt="Status: developer preview"></a>
-  <a href="https://deepwiki.com/mrcook1e-ai/goodix-gm168sec"><img src="https://img.shields.io/badge/DeepWiki-docs-0ea5e9?logo=gitbook&amp;logoColor=white" alt="DeepWiki documentation"></a>
-</p>
+<p><a href="https://github.com/mrcook1e-ai/goodix-gm168sec/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mrcook1e-ai/goodix-gm168sec/ci.yml?style=flat-square&amp;label=CI" alt="CI: Ubuntu 24.04 &amp; Fedora 45"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-LGPL--2.1--or--later-0E7490?style=flat-square" alt="License: LGPL-2.1-or-later"></a> <a href="patches/libfprint-v1.94.100-integration.patch"><img src="https://img.shields.io/badge/libfprint-v1.94.100-334155?style=flat-square" alt="libfprint v1.94.100"></a> <a href="INSTALL.md"><img src="https://img.shields.io/badge/OpenSSL-3.x-0F766E?style=flat-square" alt="OpenSSL 3"></a> <a href="#status"><img src="https://img.shields.io/badge/status-developer_preview-B45309?style=flat-square" alt="Status: developer preview"></a></p>
 
-<p align="center">
-  <a href="docs/README.md"><strong>Documentation library</strong></a> ·
-  <a href="https://deepwiki.com/mrcook1e-ai/goodix-gm168sec">DeepWiki</a> ·
+<p>
+  <a href="docs/README.md"><strong>Documentation</strong></a> ·
   <a href="#quick-start-isolated-build--tests">Build &amp; test</a> ·
-  <a href="CONTRIBUTING.md">Contribute</a>
+  <a href="docs/BRANDING.md">Brand</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a> ·
+  <a href="https://deepwiki.com/mrcook1e-ai/goodix-gm168sec">DeepWiki</a>
 </p>
-
-Experimental [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint)
-driver for the **Goodix GM168SEC** capacitive fingerprint sensor, with SIGFM
-matching and read-only in-memory PSK recovery.
 
 ## Status
 
@@ -78,6 +67,7 @@ GNU Lesser General Public License v2.1 or later. See [`LICENSE`](LICENSE) and
   checkout, copies the driver and synthetic recovery test, and applies the patch
 - `tests/` — timeout contract and synthetic DPAPI/TLV/OpenSSL recovery tests
 - `packaging/` — udev `uaccess` rule and experimental Fedora RPM spec
+- `assets/brand/` — local Secure Signal SVG artwork and GitHub social preview
 - `docs/` — curated architecture, protocol, RE, SIGFM, recovery, and testing guides
 
 No proprietary binaries, firmware images, Windows driver files, per-device PSKs,

@@ -6,6 +6,8 @@
 *.cpp    text eol=lf
 *.hpp    text eol=lf
 *.md     text eol=lf
+*.svg    text eol=lf
+*.png    binary
 # Patch context must preserve upstream whitespace for git apply.
 *.patch  text eol=lf whitespace=-trailing-space
 *.rules  text eol=lf
