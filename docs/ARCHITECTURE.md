@@ -98,7 +98,7 @@ sequenceDiagram
         Drv->>Usb: 0xD0 TLS_START + B0 handshake pump <-> SSL_accept thread
         Tls-->>Drv: GSource idle callback -> tls_done = TRUE (pthread exits)
         Drv->>Usb: 0x90 SET_PARAM -> 0xC4 x2 -> 0x60 -> 0xD6 -> 0xAE -> 0x32
-        Drv->>Usb: 5x dark BG frames (0x20 trigger + B2 decrypt + BG mean >= 2200)
+        Drv->>Usb: 5x dark BG frames (0x20 trigger + B2 decrypt + BG mean >= 2500)
         Drv->>Usb: REARM chain (0x34 x2 -> 150ms -> 0xAE -> 0x32)
         Drv-->>Core: gm168_activate_complete(NULL)
     end
@@ -106,7 +106,7 @@ sequenceDiagram
     Core->>Drv: dev_change_state(AWAIT_FINGER_ON) -> start_polling()
     User->>Usb: Touch capacitive sensor
     Usb-->>Drv: A0 touch packet (echo=0x32, status=0x02)
-    Drv->>Drv: Wait capture settle delay (150ms default, unchanged)
+    Drv->>Drv: Wait capture settle delay (220ms default, retuned 150->220 provisional)
     Drv->>Usb: CAP dual capture (#1 + #2 via 0x20 + B2 decrypt)
     Drv->>Drv: Decode 80x64 12-bit -> preprocess -> 2x resize (160x128) -> pick best
     alt Usable frame (quality > 0)
@@ -116,7 +116,7 @@ sequenceDiagram
             Drv->>Usb: REARM (0x34 x2 -> 150ms -> 0xAE -> 0x32 -> wait_lift 150ms default)
         and
             Core->>Core: GTask worker: normalize flags + sigfm_extract() + coverage
-            Core->>Core: Quality gate + reciprocal/RANSAC match (threshold >= 8)<br/>or enroll anti-dup check (may report match before lift)
+            Core->>Core: Quality gate + reciprocal/RANSAC match (threshold >= 7)<br/>or enroll anti-dup check (may report match before lift)
         end
         alt Client cancels after early match while REARM is active
             Drv->>Drv: deinit_pending = TRUE (preserve generation + io_cancellable)
@@ -135,7 +135,7 @@ sequenceDiagram
 
 > **Empty-Gallery `IDENTIFY` Shortcut (`fp_image_device_start_capture_action`)**
 >
-> For `FPI_DEVICE_ACTION_IDENTIFY`, if the gallery is `NULL` or empty (`len == 0`) after template-type checks, `FpImageDevice` resets any pending verify retry state, immediately calls `fpi_device_identify_report(..., NULL, NULL, NULL)` and `fpi_device_identify_complete(..., NULL)`, and returns without invoking `dev_activate()`, `dev_change_state()`, or SIGFM retries. An owner-run clean live test completed `20/20` enrollment, observed the empty-gallery shortcut, and completed three cancellation-drain branches without `stale device operation` or failed `REARM`/`DEINIT`. A separate displaced/angled-finger sequence still produced low-score no-matches, so matching coverage and retry UX remain open; no population accuracy or latency guarantee is inferred.
+> For `FPI_DEVICE_ACTION_IDENTIFY`, if the gallery is `NULL` or empty (`len == 0`) after template-type checks, `FpImageDevice` resets any pending verify retry state, immediately calls `fpi_device_identify_report(..., NULL, NULL, NULL)` and `fpi_device_identify_complete(..., NULL)`, and returns without invoking `dev_activate()`, `dev_change_state()`, or SIGFM retries. An earlier owner-run clean live test (before the current settle/BG/raw-rank and SIGFM threshold/ratio retunes) observed this shortcut and completed three cancellation-drain branches without `stale device operation` or failed `REARM`/`DEINIT`. A later post-retune smoke completed `20/20` enrollment and five successful verification sessions on one device, but did not repeat the empty-gallery/cancellation matrix. A separate displaced/angled-finger sequence still produced low-score no-matches, so matching coverage and retry UX remain open; no population accuracy or latency guarantee is inferred.
 
 ## Threading and GLib Owner Context
 

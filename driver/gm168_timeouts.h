@@ -55,6 +55,18 @@
  * value + 35ms slack for slow USB hosts / usbipd.                          */
 #define GM168_REARM_DELAY_MS            150
 
+/* CAPTURE_SETTLE (poll path): pause between FDT touch detect (poll_cb) and
+ * SCAN_TRIG (start_capture_ssm) so the capacitive front-end and the ADC
+ * pipeline settle after the finger-down transient. Provisionally retuned
+ * 150 -> 220 ms after owner-observed dual captures on one device frequently
+ * favored the later frame; live A/B validation is still required. Overridable
+ * via $GM168_CAPTURE_SETTLE_MS (clamped to MIN..MAX). Not part of any SSM
+ * deadline — the timeout fires before start_capture_ssm arms the capture
+ * deadline. */
+#define GM168_CAPTURE_SETTLE_MS         220
+#define GM168_CAPTURE_SETTLE_MIN_MS     100
+#define GM168_CAPTURE_SETTLE_MAX_MS     2000
+
 /* ---- Retry caps ------------------------------------------------------- */
 
 /* Max consecutive re-listens in ack_cb / bg_rx_cb / psk_read_rx_cb before
@@ -113,6 +125,10 @@ _Static_assert (GM168_USB_TX_TIMEOUT_MS       == 2000, "G13: TX timeout drifted"
 _Static_assert (GM168_WAKEUP_DELAY_MS         == 50,   "G13: wakeup delay drifted");
 _Static_assert (GM168_TLS_PUMP_DELAY_MS       == 10,   "G13: TLS pump delay drifted");
 _Static_assert (GM168_REARM_DELAY_MS          == 150,  "G13: rearm delay drifted (now matches Windows ~115ms + slack)");
+_Static_assert (GM168_CAPTURE_SETTLE_MS       == 220,  "capture settle drifted (retuned 150 -> 220 for front-end settling)");
+_Static_assert (GM168_CAPTURE_SETTLE_MIN_MS   < GM168_CAPTURE_SETTLE_MS &&
+                GM168_CAPTURE_SETTLE_MS       < GM168_CAPTURE_SETTLE_MAX_MS,
+                "capture settle default outside env clamp range");
 _Static_assert (GM168_USB_RX_RETRY_LIMIT      == 60,   "G13: RX retry limit drifted");
 _Static_assert (GM168_TLS_RETRY_LIMIT         == 60,   "G13: TLS retry limit drifted");
 

@@ -28,8 +28,8 @@ recovery subsystem, and the project's clean-room engineering boundaries.
 
 ### Repository Root Guides & Policies
 
-- [`README.md`](../README.md) — Project overview, confirmed hardware/firmware status, overlay layout, and quick-start build commands.
-- [`INSTALL.md`](../INSTALL.md) — Dependency matrix (OpenSSL 3, OpenCV 4, GLib, GUsb, doctest), isolated Meson build, optional udev rule, and private state setup.
+- [`README.md`](../README.md) — Short Russian user guide: ready-made Fedora RPM installation, removal, current limits, and complete contributor credits.
+- [`INSTALL.md`](../INSTALL.md) — Dependency matrix (OpenSSL 3, OpenCV 4, GLib, GUsb, doctest), isolated Meson build, local RPM build, optional udev rule, and private state setup.
 - [`CHANGELOG.md`](../CHANGELOG.md) — Unreleased overlay changes, SIGFM migration, PSK recovery additions, and known limitations.
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) — Safe bug-report checklist, code contribution rules, and upstream readiness expectations.
 - [`SECURITY.md`](../SECURITY.md) — Sensitive artifact exclusions, runtime storage permissions (`0700`/`0600`), vulnerability reporting, and scope warning.
@@ -48,7 +48,7 @@ recovery subsystem, and the project's clean-room engineering boundaries.
 | [`SIGFM.md`](SIGFM.md) | Rationale for replacing NBIS, SIFT + Lowe ratio + RANSAC affine pipeline, `SGFM` v1 / `FP3` integration, async extraction, 20-stage anti-dup, verify auto-retry, and FAR/FRR limits | `patches/libfprint-v1.94.100-integration.patch`, `driver/goodix_gm168.c` |
 | [`REVERSE-ENGINEERING.md`](REVERSE-ENGINEERING.md) | Research history, static + dynamic + synthetic differential methodology, proven vs unproven boundaries, `GFUSB_GM168SEC_APP_10036` findings, and Windows re-provisioning behavior | `driver/goodix_proto.c`, `driver/gm168_psk_recovery.c`, [`../NOTICE`](../NOTICE) |
 | [`TESTING.md`](TESTING.md) | Isolated build/apply steps, synthetic KAT/unit/negative suites, Valgrind/memory hygiene, experimental RPM `%check`, offline vs live proof boundary, and user hardware validation | `tools/apply-overlay.sh`, `tests/test_timeouts.c`, `packaging/fedora/libfprint-goodix-gm168.spec` |
-| [`DEVELOPMENT.md`](DEVELOPMENT.md) | Overlay maintenance, integration patch regeneration excluding `driver/`, diagnostic environment variables, and upstream blockers | `tools/apply-overlay.sh`, `patches/libfprint-v1.94.100-integration.patch` |
+| [`DEVELOPMENT.md`](DEVELOPMENT.md) | Overlay maintenance, integration patch regeneration excluding `driver/`, isolated RPM/release packaging, diagnostic environment variables, and upstream blockers | `tools/apply-overlay.sh`, `packaging/fedora/build-rpm.sh`, `patches/libfprint-v1.94.100-integration.patch` |
 | [`SECURITY.md`](SECURITY.md) | Runtime `/etc/goodix-gm168` ownership checks, PSK lifecycle rules, sensitive diagnostic artifact bans, and advisory process | `driver/goodix_gm168.c`, `driver/gm168_log.c` |
 | [`FAQ.md`](FAQ.md) | Troubleshooting missing/stale PSKs, Windows dual-boot rotation, optional calibration, Fedora 45 OpenSSL 3/TLS errors, template incompatibility, and safe bug reporting | [`SECURITY.md`](SECURITY.md), [`TESTING.md`](TESTING.md), [`PSK-RECOVERY.md`](PSK-RECOVERY.md) |
 

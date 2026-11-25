@@ -19,6 +19,11 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   deactivation while finger presence or asynchronous extraction is active.
 - `goodix-gm168-frame-layout` synthetic coverage of the exact production 12-bit
   unpack/transpose function, including all `5120` mappings and malformed input.
+- Pure C11 capture-selection policy in `driver/gm168_capture_policy.h`
+  (`gm168_dual_pick`, `gm168_effective_rank`, `gm168_raw_rank`,
+  `GM168_BG_MIN_MEAN_DEFAULT`), shared by the capture success path and the
+  error fallback and exercised by the standalone contract test on synthetic
+  buffers only.
 - Read-only recovery of the existing PSK when `psk.bin` is absent: fresh E4
   hash validation, dynamic DPAPI v1 parsing, exact white-box TLV validation,
   OpenSSL 3 decryption, constant-time hash verification, and in-memory TLS use.
@@ -26,6 +31,12 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
 - Dedicated synthetic `goodix-gm168-psk-recovery` unit tests for Python parity,
   malformed/truncated/overflow inputs, HMAC/PKCS#7/canonical-IV failures, hash
   mismatch, zero-PSK sentinels, bounded replies, and cleanup.
+- Fedora 45 `x86_64` RPM packaging with a private runtime under
+  `/opt/libfprint-gm168`, an `fprintd`-only systemd drop-in, a reproducible
+  `packaging/fedora/build-rpm.sh` helper, and binary/source RPM checksums. The
+  package coexists with system `libfprint` and preserves existing device state.
+- GitHub Actions tag-driven Fedora 45 RPM builds and prerelease publication,
+  with offline test execution and no live-hardware claims from CI.
 
 ### Changed
 - Overlapped usable-frame submission in `driver/goodix_gm168.c`:
@@ -36,9 +47,42 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   `self->capture_submitted` remains `TRUE` until finger-off, and
   `dev_change_state(AWAIT_FINGER_OFF)` leaves reporting `finger_status(FALSE)`
   exclusively to `rearm_completed()` / `recover_completed()`.
-  `GM168_CAPTURE_SETTLE_MS` (`150 ms`) and the `wait_lift` default (`150 ms`)
-  are unchanged—responsiveness gains come solely from overlapping processing
-  with `REARM`, with no new hardware timing or accuracy claims.
+  The `wait_lift` default (`150 ms`) is unchanged — responsiveness gains come
+  solely from overlapping processing with `REARM`.
+- Dual-capture selection now uses a pre-stretch raw ranking score (population
+  variance of the background-subtracted central crop, saturation gate `> 30%`)
+  computed by `gm168_raw_rank()`. Best-of-N keep remains post-quality ordered,
+  so a frame crossing `GM168_QUALITY_THRESH` cannot be hidden by a
+  below-threshold high-variance incumbent. `gm168_dual_pick()` uses post-quality
+  solely for usability and prefers the settled second usable frame unless the
+  first clearly wins by raw rank (`rank2 * 5 < rank1 * 4`); zero raw ranks can
+  tie without being confused with rejected zero-quality frames.
+  `gm168_effective_rank()` zeroes the rank of any frame the post-stretch gate
+  rejects, and success/error fallback share one ownership-safe selection path.
+  The raw rank is never compared against `GM168_QUALITY_THRESH`; zero-quality
+  drop and `REARM` lifecycle semantics are unchanged. During the second dual
+  frame the driver no longer spends an extra rearm retry once frame #1 is usable.
+- Capture settle (`GM168_CAPTURE_SETTLE_MS`) retuned `150 ms` → `220 ms`
+  (provisional, one owner device; `$GM168_CAPTURE_SETTLE_MS` clamp `100..2000`
+  unchanged) and dark-background acceptance floor (`GM168_BG_MIN_MEAN_DEFAULT`)
+  retuned `2200` → `2500` (provisional, one owner device;
+  `$GM168_BG_MIN_MEAN` override retained). A short post-reset live smoke now
+  covers the combined defaults, but no controlled old/new A/B comparison has
+  isolated either retune.
+- SIGFM match threshold (`GM168_SIGFM_THRESHOLD`) retuned `8` → `7`
+  (provisional) with a new `$GM168_SIGFM_THRESHOLD` override (`4..1000`) for
+  A/B testing and rollback; `GM168_SIGFM_DUP_THRESHOLD = 15` and
+  `GM168_SIGFM_VERIFY_RETRIES = 2` are unchanged. The SIGFM inlier-fraction
+  guard (`kMinInlierRatio`) was retuned `0.40` → `0.30`; reciprocal matching,
+  the 4-DoF similarity window (`scale 0.80..1.25`, inclusive bounds), and the
+  `0.80` Lowe ratio are unchanged. A 6-DoF matcher was deliberately not
+  enabled without genuine/impostor validation.
+- In `sigfm_match_score_with_flags()`, in-memory NaN/Inf validation of
+  keypoints and descriptors now runs before the `rows < 2` small-set early
+  return, so a single non-finite feature in a one-row set fails closed instead
+  of scoring a zero non-match. The `SGFM` v1 keypoint-count serialization
+  limit, inclusive RANSAC scale boundaries, and final-tile coverage semantics
+  gained explicit synthetic regression tests.
 - Cancellation-safe `REARM` draining: an early-match client cancellation now
   preserves generation and `io_cancellable` while `rearm_active && !device_dead`,
   sets `deinit_pending`, and enters `DEINIT` only from `rearm_completed()` after
@@ -77,8 +121,10 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
 - Removed legacy research/Windows/Frida scripts, curl-pipe installer, global
   `ldconfig` wiring, and duplicate `plugdev` udev rules.
 - Updated `tools/apply-overlay.sh`, `tests/test_timeouts.c`, `.gitignore`,
-  `NOTICE`, `SECURITY.md`, `CONTRIBUTING.md`, `README.md`, `INSTALL.md`,
-  `docs/`, and the experimental Fedora RPM spec.
+  `NOTICE`, `SECURITY.md`, `CONTRIBUTING.md`, `INSTALL.md`, and `docs/`.
+  `README.md` is now a short Russian user guide focused on the ready-made RPM;
+  protocol, matching, recovery, and development details remain linked under
+  `docs/`, and the complete contributor credits are retained.
 
 ### Fixed
 - Background receive now processes every non-empty transfer, drains all ready
@@ -107,13 +153,26 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   base subobject, and obsolete framing/CLAHE code was removed.
 
 ### Validation
-- An owner-run clean live test of the revised pipeline enrolled `right-thumb`
-  (`20/20`), observed the empty-gallery `identify` shortcut and a zero-quality
-  dual-capture drop followed by a later match, recorded five `verify-match`
-  events, and completed three bounded `REARM` cancellation drains. No `stale
-  device operation`, failed `REARM`/`DEINIT`, or watchdog failure occurred. This
-  validates the exercised lifecycle paths on one device only; no population
-  FAR/FRR or throughput claim is inferred.
+- All retuned constants (`220 ms` settle, BG mean `2500`, SIGFM threshold `7`,
+  inlier ratio `0.30`) and the raw-rank selection policy retain offline
+  synthetic coverage (`tests/test_timeouts.c` dual-policy and raw-rank matrix,
+  `sigfm-tests` boundary cases, targeted/full Meson suites). These checks do not
+  measure real-finger accuracy or prove a benefit over the old defaults.
+- An owner-run post-fix smoke on one `27c6:589a`, after a full template reset
+  and clean isolated reinstall, completed `right-thumb` enrollment at `20/20`
+  stages. It recorded 15 anti-duplicate rejections and one recovered `REARM`
+  timeout, then five verification sessions ending in `verify-match`: four on
+  the first touch and one after a bounded retry. No final `verify-no-match`,
+  watchdog, or TLS error occurred in that short series. The raw-rank dual
+  fallback path was exercised. This is single-device live smoke evidence, not
+  a controlled A/B, impostor study, population FAR/FRR, `FAR=0`, or throughput
+  claim.
+- An earlier owner-run clean live test of the overlapped-submission pipeline
+  (before the settle/BG/threshold retunes documented above) observed the
+  empty-gallery `identify` shortcut and a zero-quality dual-capture drop
+  followed by a later match, and completed three bounded `REARM` cancellation
+  drains without `stale device operation` or failed `REARM`/`DEINIT`. Those
+  lifecycle observations remain limited to the exercised paths on one device.
 - Offline synthetic coverage in `tests/test-fpi-sigfm.c` includes
   `/sigfm/image_device/identify_empty_gallery`,
   `/sigfm/image_device/identify_match_before_finger_off`, and
@@ -123,7 +182,8 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   revision passed (`8 OK`, `34` disabled-driver/data skips) alongside Valgrind
   checks; translation consensus remains an opt-in synthetic A/B path and stays
   off.
-- Live APP 10036 smoke testing (predating these lifecycle and matcher updates)
+- Live APP 10036 smoke testing (predating these lifecycle, matcher, and
+  capture-policy updates)
   completed cold INIT/TLS/BG and `12` successful enroll stages across `15`
   touches before a `G_IO_ERROR_CANCELLED` stop. No TLS, background,
   REARM/RECOVER, or watchdog failure was observed; median dual-capture time was
@@ -140,6 +200,11 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   internal retries expanded that sequence to nine scans; reducing retries is a
   possible UX follow-up but does not improve matching. Same-gallery A/B work is
   still required, and no new timing or FAR/FRR claims are made.
+- The `220 ms` settle, BG mean `2500`, SIGFM threshold `7`, and inlier ratio
+  `0.30` defaults remain provisional single-device retunes. The successful
+  post-reset smoke does not isolate their individual effects; the impostor-side
+  risk of the lower threshold and ratio still requires same-gallery
+  genuine/impostor A/B validation.
 - PSK recovery is validated only for the existing-key APP 10036 layout; it does
   not provision a new key and does not provide automatic persistent storage.
 - Suspend/resume, USB hotplug, and alternative firmware variants remain

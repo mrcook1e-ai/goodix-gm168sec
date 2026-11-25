@@ -15,7 +15,10 @@
 - `tests/test_timeouts.c` — standalone compile-time timeout checks plus the runtime `gm168_lifecycle.h` cancellation predicate matrix
 - `tests/test-goodix-gm168-psk-recovery.c` — synthetic DPAPI/TLV/OpenSSL and E4
   reply tests; Meson links the pure recovery module without accessing USB
-- `packaging/` — `uaccess` udev rule and experimental Fedora RPM spec
+- `packaging/` — `uaccess` udev rule, isolated Fedora 45 RPM spec, reproducible
+  `packaging/fedora/build-rpm.sh` helper, and `fprintd` systemd drop-in
+- `.github/workflows/release-rpm.yml` — Fedora 45 RPM build/test workflow and
+  tag-driven GitHub prerelease publication (offline CI only)
 
 ## Applying and testing changes
 
@@ -44,6 +47,33 @@ rm -f /tmp/test_timeouts
 
 To verify `libfprint` links only OpenSSL 3 (`libssl.so.3` / `libcrypto.so.3`) on
 Fedora 45, inspect `ldd build/libfprint/libfprint-2.so.2*`.
+
+## Building the Fedora 45 RPM
+
+Install the normal build dependencies plus `rpm-build` and `bzip2`, then run:
+
+```bash
+./packaging/fedora/build-rpm.sh ./dist
+```
+
+The helper clones and verifies pinned upstream commit
+`80a4b5ec612892c5c056c48dddaa561452cf37ec`, archives the current overlay without
+local build trees or device data, and invokes `rpmbuild -ba` in a temporary
+topdir. The spec runs targeted and full Meson tests plus the standalone timeout
+contract. Outputs are the `x86_64` RPM, SRPM, and `SHA256SUMS`; the helper never
+installs them.
+
+The runtime library is intentionally private to `/opt/libfprint-gm168`. Keep
+`__provides_exclude_from` so its SONAME does not satisfy system `libfprint`
+dependencies, but do not suppress automatic `Requires` generation for OpenSSL 3,
+OpenCV, GLib, and other runtime libraries. The systemd drop-in belongs in
+`%{_unitdir}/fprintd.service.d/`; user overrides remain under `/etc/systemd/`.
+Do not add global `ldconfig` configuration or reintroduce `Conflicts: libfprint`.
+
+`.github/workflows/release-rpm.yml` runs the same helper in a `fedora:45`
+container. A pushed `v*` tag publishes a prerelease through `gh`; manual
+`workflow_dispatch` performs only the build and artifact upload. Neither path
+accesses hardware.
 
 ### Mixed Public/Private API Test Linking (`libfprint_static_dep`)
 
@@ -97,6 +127,8 @@ All diagnostic hooks are off by default:
   diagnostics (treat output as sensitive biometric data; never publish)
 - `GM168_DUP_THRESH` — override enrollment anti-duplicate SIGFM score threshold
   (`0..1000`, default `15`)
+- `GM168_SIGFM_THRESHOLD` — override the SIGFM match threshold (`4..1000`,
+  default `7`, provisional; exists for A/B testing and rollback)
 - `GM168_VERIFY_RETRIES` — override verify/identify auto-retry count (`0..5`,
   default `2`)
 - `GM168_SIGFM_MIN_KEYPOINTS` — override the centered-finger feature-count gate
@@ -104,9 +136,11 @@ All diagnostic hooks are off by default:
 - `GM168_SIGFM_MIN_COVERAGE` — override active `8x8`-tile coverage (`0..1`,
   default `0.55`; `0` disables)
 - `GM168_BG_MIN_MEAN`, `GM168_BG_RETRIES` — dark background validation mean floor
-  and retry cap
+  (default `2500`, provisional retune from `2200` on one owner device) and
+  retry cap
 - `GM168_CAPTURE_SETTLE_MS`, `GM168_WAIT_LIFT_POLL_MS` — capture settle and
-  lift-poll interval overrides (both default to `150 ms`, unchanged)
+  lift-poll interval overrides (settle default `220 ms`, provisionally retuned
+  from `150 ms`, clamp `100..2000`; lift-poll default `150 ms`, unchanged)
 
 ## Remaining blockers before general release / upstreaming
 

@@ -3,6 +3,7 @@ build/
 _build/
 pkg/
 prefix/
+dist/
 *.o
 *.so
 *.so.*

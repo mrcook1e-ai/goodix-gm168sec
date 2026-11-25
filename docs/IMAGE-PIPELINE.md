@@ -4,10 +4,10 @@
 
 When your finger touches the sensor, the hardware does not immediately hand Linux a clean PNG. Instead, the driver runs a short cleanup pipeline so SIFT can see crisp skin ridges:
 
-1. **Take 5 blank "dark" pictures at cold startup** (when no finger is on the glass) to measure the sensor's baseline noise. If a finger is already resting on the pad (`mean < 2200`), the driver rejects the "poisoned" background and waits for you to lift first.
+1. **Take 5 blank "dark" pictures at cold startup** (when no finger is on the glass) to measure the sensor's baseline noise. If a finger is already resting on the pad (`mean < 2500`, the provisional retuned `GM168_BG_MIN_MEAN` default; override with `$GM168_BG_MIN_MEAN`), the driver rejects the "poisoned" background and waits for you to lift first.
 2. **Unpack raw 12-bit USB pixels**: Each decrypted `10564`-byte frame holds `80` padded rows of packed 12-bit sensor readings, transposed into an `80×64` grayscale image.
 3. **Subtract background & boost local ridges**: Subtracting the dark baseline, removing single-pixel speckles (`3x3` median), and stretching local contrast brings out pores and ridges cleanly — no Windows calibration files needed.
-4. **Pick the sharper of 2 frames (`dual capture`) & upscale `2x`**: Touching once triggers two quick frames back-to-back (capturing the settled finger) and picks the higher-contrast one, then scales `80×64` → `160×128` (`2x`, which outperformed `3x` and `4x` in testing).
+4. **Pick the sharper of 2 frames (`dual capture`) & upscale `2x`**: Touching once triggers two quick frames back-to-back (capturing the settled finger). Candidate ordering uses a pre-stretch raw ranking score (population variance of the background-subtracted central crop), and the settled second frame wins unless the first clearly beats it, then scales `80×64` → `160×128` (`2x`, which outperformed `3x` and `4x` in testing).
 
 The Goodix GM168SEC captures small capacitive frames (`80x64` native pixels) encrypted over TLS `B2` packets and transforms them into `160x128` 8-bit grayscale `FpImage` objects for `libfprint` `FPI_PRINT_SIGFM` extraction.
 
@@ -24,7 +24,7 @@ flowchart LR
     TLS_DEC --> UNPACK["gm168_decode_frame()<br/>80x132 -> 80x96 -> 12-bit unpack<br/>+ transpose to 64x80 u16"]
 
     UNPACK --> INIT_OR_CAP{"Init BG or<br/>Live Touch?"}
-    INIT_OR_CAP -->|"INIT_BG_LOOP_CHECK (5x)"| BG_VAL["Average 5 dark frames<br/>Check bg_mean >= 2200"]
+    INIT_OR_CAP -->|"INIT_BG_LOOP_CHECK (5x)"| BG_VAL["Average 5 dark frames<br/>Check bg_mean >= 2500"]
     BG_VAL -->|"Pass"| BG_REF["Store self->background (5120 u16)"]
 
     INIT_OR_CAP -->|"capture_completed()"| BRANCH{"cal1 && cal2<br/>loaded?"}
@@ -75,8 +75,8 @@ Logical pixel `k` (`0..5119`) is written through `gm168_stream_to_image_index(k)
 When no optional calibration files are loaded, `INIT` captures **`GM168_BG_FRAMES = 5`** dark no-finger frames (`INIT_BG_TRIG` → `INIT_BG_RX` → `INIT_BG_PROCESS`) and averages them pixel-wise into `self->background`:
 
 - `INIT_BG_PROCESS` parses `B0`, `B2`, and `A0` packets using the exact same loop structure as `CAP_PROCESS` so partial reads or control packets cannot cause non-deterministic background averages.
-- **Background validation gate**: `INIT_BG_LOOP_CHECK` computes `bg_mean` across all `5120` pixels and compares it against `GM168_BG_MIN_MEAN` (default **`2200`**, overridable `0..4095`).
-  - If a finger is resting on the sensor during cold start, `bg_mean` drops below `2200`; accepting that frame would poison background subtraction for the entire session.
+- **Background validation gate**: `INIT_BG_LOOP_CHECK` computes `bg_mean` across all `5120` pixels and compares it against `GM168_BG_MIN_MEAN` (default **`2500`**, overridable `0..4095`; retuned `2200` → `2500` provisionally on one owner device after partial-contact backgrounds passed the old gate).
+  - If a finger is resting on the sensor during cold start, `bg_mean` drops below `2500`; accepting that frame would poison background subtraction for the entire session.
   - On rejection, the driver frees `background_sum`, sets `bg_waiting_lift = TRUE`, runs `INIT_BG_REARM_*` + `INIT_BG_WAIT_LIFT`, and retries up to `GM168_BG_RETRIES` (default **`3`**, max `10`) before failing `INIT`.
 
 ### Atomic FDT Threshold Loading and Calibration
@@ -129,20 +129,23 @@ To avoid submitting smudged landing frames or timing out on held touches, `captu
    - Inspects the central `48x48` crop (`x = 16..63`, `y = 8..55`) where ridges sit and outer illumination falloff is excluded.
    - **Saturation gate**: if `> 30%` of central pixels are saturated (`<= 2` or `>= 253`), immediately returns `0.0f`.
    - Otherwise returns the pixel standard deviation (`sqrt(variance)`).
+   - Independently, `gm168_raw_rank()` (`driver/gm168_capture_policy.h`) scores the freshly decoded **12-bit raw** frame before the envelope stretch: population variance of the background-subtracted signal over a central crop (`x: [w/5, w-w/5)`, `y: [h/8, h-h/8)`), returning `0` when more than `30%` of crop pixels sit on a 12-bit saturation rail (`0x0000`/`0x0FFF`) or the geometry is degenerate. This raw rank is a **selection key only** for the dual success/error-fallback pick; it is never compared against `GM168_QUALITY_THRESH`. `gm168_effective_rank()` zeroes the rank of any frame the post-stretch gate rejected (`quality == 0`) so a high raw variance cannot make a rejected frame win. A usable frame with raw rank `0` remains distinguishable through its post-quality.
 2. **Quality-gate retry loop**:
-   - `capture_after_settle_cb()` does **not** report finger-present yet; it keeps `GM168_CAPTURE_SETTLE_MS` at `150 ms` (default) and starts `CAP`.
+   - `capture_after_settle_cb()` does **not** report finger-present yet; it keeps `GM168_CAPTURE_SETTLE_MS` at `220 ms` (default; retuned `150` → `220` provisionally on one owner device, clamp `100..2000` via `$GM168_CAPTURE_SETTLE_MS`) and starts `CAP`.
    - Retries capture (`start_rearm_retry_ssm()` with `200 ms` delay, skipping `finger_status(FALSE)`) if `best_quality < GM168_QUALITY_THRESH` (`25.0f`) **unless**:
      - `best_quality == 0.0f` (advances directly to dual capture #2 rather than spinning fast retries—the second frame on the same touch may still yield usable ridge data),
-     - `capture_attempt >= GM168_MAX_CAPTURE_ATTEMPTS` (`6`), or
-     - `elapsed >= GM168_CAPTURE_BUDGET_MS` (`600 ms`).
+     - `capture_attempt >= GM168_MAX_CAPTURE_ATTEMPTS` (`6`),
+     - `elapsed >= GM168_CAPTURE_BUDGET_MS` (`600 ms`), or
+     - the driver is in the second dual-capture frame and frame #1 is already usable (`dual_in_second && dual_pending_quality > 0.0f`) — frame #2 goes straight to the dual pick without spending an extra rearm retry.
+   - Within a touch, a new frame replaces the best candidate only when its **post-stretch quality** strictly beats the incumbent, preserving the original accept/retry semantics. Its attached effective raw rank is retained for the final dual pick and never drives the accept gate or zero-quality drop.
 3. **Dual capture (`dual_in_second`), early overlapped submission, and zero-quality discard**:
    - Once the first quality-accepted frame (`dual_pending_img`) is obtained, the driver immediately triggers a **second** `SCAN_TRIG` (`start_capture_ssm()`) **without** an intermediate `REARM` (mirroring observed Windows capture behavior while the finger stays settled).
-   - When frame #2 finishes, `capture_completed()` picks whichever of `#1` or `#2` has the higher `quality` score:
+   - When frame #2 finishes, `capture_completed()` picks between `#1` and `#2` with the shared pure policy `gm168_dual_pick()`: post-quality first determines usability, then raw ranks order the usable candidates. The settled second frame wins ties (including two usable zero ranks) and anything within a `4/5` margin (`rank2 * 5 >= rank1 * 4`), while a clear first-frame rank win takes `#1`; zero/NaN post-quality counts as unusable:
      - **Usable frame (`submit_q > 0.0f`)**: calls `gm168_submit_capture()` (`self->capture_submitted = TRUE`, `report_finger_status(TRUE)`, and `fpi_image_device_image_captured()`) **before** starting `REARM`. SIGFM feature extraction and verify/identify matching therefore overlap `REARM` (`0x34` discharge + `150 ms` delay + `wait_lift` default `150 ms`), while `dev_change_state(AWAIT_FINGER_OFF)` leaves reporting `finger_status(FALSE)` strictly to `rearm_completed()` / `recover_completed()`.
      - **All-zero pair (`submit_q == 0.0f`)**: discards the image (`g_object_unref`), leaves `capture_submitted = FALSE`, generates **no** libfprint retry or verify attempt, runs `REARM`, and resumes polling once `REARM` finishes.
-   - **Error fallback**: if a subsequent retry or dual frame #2 fails with a recoverable capture error while `best_img` or `dual_pending_img` already holds a candidate, the higher-quality candidate is selected and the other is released. If its quality is `> 0.0f`, `gm168_submit_capture()` submits it before `REARM`; if its quality is `0.0f`, the zero-quality fallback is discarded without triggering a libfprint retry/verify attempt and polling resumes after `REARM`. Capture errors with no candidate continue through `REARM`/`RECOVER` to `fpi_image_device_session_error()`. `FP_DEVICE_ERROR_REMOVED` and cancellation never use this fallback.
+   - **Error fallback**: if a subsequent retry or dual frame #2 fails with a recoverable capture error while `best_img` or `dual_pending_img` already holds a candidate, the same `gm168_take_best_capture()` path applies `gm168_dual_pick()` (post-quality usability, then raw-rank ordering), resets capture state, and releases the loser. If its quality is `> 0.0f`, `gm168_submit_capture()` submits it before `REARM`; if its quality is `0.0f`, the zero-quality fallback is discarded without triggering a libfprint retry/verify attempt and polling resumes after `REARM`. Capture errors with no candidate continue through `REARM`/`RECOVER` to `fpi_image_device_session_error()`. `FP_DEVICE_ERROR_REMOVED` and cancellation never use this fallback.
 
-An owner-run clean live test on `27c6:589a` exercised overlapped submission and observed a zero-quality dual-capture discard followed by `REARM` and a later match, in addition to the offline synthetic coverage. This is single-device evidence only: false-FDT frequency, displaced/angled-finger matching, and same-frame A/B evaluation remain open.
+A post-fix owner smoke on one `27c6:589a`, after a full template reset and clean isolated reinstall, exercised the `220 ms` settle, BG `2500`, and raw-rank dual selection path during a completed `20/20` enrollment and five successful verification sessions. The run included raw-rank dual fallback and one recovered `REARM` timeout, with no watchdog or TLS error. An earlier live test exercised overlapped submission and observed a zero-quality dual-capture discard followed by `REARM` and a later match. These are short single-device observations, not controlled A/B evidence: false-FDT frequency, displaced/angled-finger matching, comparison against the old defaults, and same-frame evaluation remain open.
 
 ## SIGFM Feature-Quality Gate
 

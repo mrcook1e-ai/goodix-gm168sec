@@ -95,7 +95,7 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     state "Touch Polling (EP_IN 0x83)" as POLL
-    state "Capture Settle Timer (150 ms default)" as SETTLE
+    state "Capture Settle Timer (220 ms default)" as SETTLE
 
     POLL --> SETTLE : A0 touch (echo=0x32, status=0x02)
     SETTLE --> CAP_TRIG : capture_after_settle_cb() (no finger-present yet)
@@ -155,13 +155,14 @@ stateDiagram-v2
 ### Key `CAP` / `REARM` / `RECOVER` Mechanics
 
 - **Overlapped early submission (`gm168_submit_capture()`)**:
-  - `capture_after_settle_cb()` does **not** call `fpi_image_device_report_finger_status(TRUE)` after the settle delay (`GM168_CAPTURE_SETTLE_MS = 150` and `GM168_WAIT_LIFT_POLL_DEFAULT_MS = 150` remain unchanged).
+  - `capture_after_settle_cb()` does **not** call `fpi_image_device_report_finger_status(TRUE)` after the settle delay. The settle default was retuned `150 ms` → `220 ms` (`GM168_CAPTURE_SETTLE_MS`, provisional on one owner device, clamp `100..2000` via `$GM168_CAPTURE_SETTLE_MS`); `GM168_WAIT_LIFT_POLL_DEFAULT_MS = 150` is unchanged.
   - Once `capture_completed()` obtains a usable frame (`quality > 0.0f`), `gm168_submit_capture()` sets `self->capture_submitted = TRUE`, calls `report_finger_status(TRUE)` and `fpi_image_device_image_captured()`, and then launches `start_rearm_ssm()`.
-  - Because `image_captured()` runs before `REARM`, `GTask` SIGFM extraction and verify/identify matching can complete concurrently while `REARM` runs the capacitive discharge (`0x34`) and `wait_lift` loop. Responsiveness gains come from this overlap rather than shortening settle or lift-poll timers.
+  - Because `image_captured()` runs before `REARM`, `GTask` SIGFM extraction and verify/identify matching can complete concurrently while `REARM` runs the capacitive discharge (`0x34`) and `wait_lift` loop. Overlap responsiveness is independent of the provisional `150 ms` → `220 ms` settle retune documented above.
   - `dev_change_state(FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF)` only clears `self->active_state = FALSE` and does **not** report finger-off (reporting it there would deactivate and cancel the active `REARM` SSM). Only `rearm_completed()` or `recover_completed()` clears `self->capture_submitted` and emits `report_finger_status(FALSE)`.
 - **Zero-quality discard (no false-FDT retries)**:
   - If both dual frames have `quality == 0.0f` (or a mid-retry error fallback has `quality == 0.0f`), `capture_completed()` unrefs and discards the `FpImage`, keeps `self->capture_submitted == FALSE`, and runs `start_rearm_ssm(self, NULL)` without calling `report_finger_status(TRUE)`, `image_captured()`, or `retry_scan()`. No libfprint retry or verify attempt is consumed, and `rearm_completed()` resumes `start_polling()` since the core never left `AWAIT_FINGER_ON`.
   - Capture errors without a usable frame still pass `rd->err` through `REARM`/`RECOVER` and terminate with `fpi_image_device_session_error()`.
+- **Quality/rank candidate selection (`driver/gm168_capture_policy.h`)**: best-of-N keep remains ordered by post-stretch `quality`, preserving the accept/retry invariant when a later frame crosses `GM168_QUALITY_THRESH`. Only the final dual success/error-fallback pick orders two usable frames by the pre-stretch raw rank (`gm168_raw_rank`, population variance of the background-subtracted central crop with a `> 30%` saturation rejection). `gm168_dual_pick()` checks post-quality for usability, then prefers the settled second frame unless the first clearly wins (`rank2 * 5 < rank1 * 4`); two usable zero ranks tie in favor of frame #2, while a rejected zero-quality frame cannot win. `gm168_effective_rank()` forces rank `0` whenever the post-stretch gate rejects a frame. The raw rank never drives the accept gate or zero-quality drop. While `dual_in_second` is set and frame #1 is usable (`dual_pending_quality > 0.0f`), `capture_completed()` accepts immediately after frame #2 instead of spending an extra rearm retry.
 - **Budget-bounded `CAP_RX`**: each `CAP_RX` USB read uses `min(GM168_USB_RX_SHORT_TIMEOUT_MS, max(50, GM168_CAPTURE_BUDGET_MS - elapsed_ms))` (`1000 ms` max, `600 ms` total touch budget, `50 ms` floor) so a quiet sensor cannot stall past the budget.
 - **Re-trigger on consecutive timeouts**: after `GM168_CAP_RX_RETRIG_AFTER` (`2`) consecutive `CAP_RX` timeouts, `capture_rx_cb()` jumps back to `CAP_TRIG` once in case the sensor dropped the scan trigger.
 - **1-byte framing resync**: in `CAP_PROCESS`, encountering an unknown packet type byte drops **only 1 byte** from `self->stitch_buf` rather than wiping the whole buffer, preserving trailing valid packets.
@@ -252,7 +253,7 @@ Because the GM168 driver submits usable frames before `REARM`/`wait_lift`, the c
 | `GM168_TLS_PUMP_DELAY_MS` | `10 ms` | Pacing between `INIT_TLS_RX` and `INIT_TLS_TX_PULL` |
 | `GM168_REARM_DELAY_MS` | `150 ms` | Capacitive front-end discharge delay between `0x34` and `0xAE` on submit |
 | `GM168_REARM_RETRY_DELAY_MS` | `200 ms` | Delay during quality-gate capture retry (`driver/goodix_gm168.c`) |
-| `GM168_CAPTURE_SETTLE_MS` | `150 ms` | Pre-capture finger settle delay (`$GM168_CAPTURE_SETTLE_MS`, `100..2000`) |
+| `GM168_CAPTURE_SETTLE_MS` | `220 ms` | Pre-capture finger settle delay (`$GM168_CAPTURE_SETTLE_MS`, `100..2000`; retuned `150` → `220` provisionally on one owner device) |
 | `GM168_WAIT_LIFT_POLL_DEFAULT_MS` | `150 ms` | Default `wait_lift_cb` poll (`$GM168_WAIT_LIFT_POLL_MS`, `50..1000`; `gm168_timeouts.h` static assert uses `300 ms` worst-case bound) |
 | `GM168_USB_RX_RETRY_LIMIT` | `60` | Per-state consecutive `ack_cb` / `bg_rx_cb` re-listen cap |
 | `GM168_TLS_RETRY_LIMIT` | `60` | Max `INIT_TLS_RX` iterations |

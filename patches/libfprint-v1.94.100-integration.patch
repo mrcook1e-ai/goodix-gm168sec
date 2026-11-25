@@ -539,7 +539,7 @@ index 9500b3a..1be9a24 100644
                                               (GEqualFunc) fp_print_equal, NULL))
          {
 diff --git a/libfprint/fpi-image-device.c b/libfprint/fpi-image-device.c
-index 87bdc60..f9c2a0a 100644
+index 87bdc60..020f142 100644
 --- a/libfprint/fpi-image-device.c
 +++ b/libfprint/fpi-image-device.c
 @@ -22,6 +22,14 @@
@@ -692,9 +692,9 @@ index 87bdc60..f9c2a0a 100644
 +}
 +
 +/* SIGFM verify/identify auto-retry on no-match (NBIS & other drivers stay at 0).
-+ * Note on FAR: allowing N retries (e.g. N=2 -> up to 3 touches per session)
-+ * gives an impostor 3 attempts instead of 1; with GM168 SIGFM background
-+ * floor <= 5 at threshold 8 (observed FAR=0), this multiplier is acceptable. */
++ * Allowing N retries (e.g. N=2 -> up to 3 touches per session) also gives an
++ * impostor multiple attempts. GM168 match thresholds and retry budgets are
++ * provisional per-driver policy; no population FAR claim is implied. */
 +void
 +fpi_image_device_apply_sigfm_verify_retry (FpImageDevice  *self,
 +                                           FpPrint        *result,
@@ -2029,10 +2029,10 @@ index 0000000..7915d4a
 +endif
 diff --git a/libfprint/sigfm/sigfm.cpp b/libfprint/sigfm/sigfm.cpp
 new file mode 100644
-index 0000000..9dee352
+index 0000000..c9312c4
 --- /dev/null
 +++ b/libfprint/sigfm/sigfm.cpp
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,577 @@
 +// SIGFM algorithm for libfprint
 +//
 +// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
@@ -2083,7 +2083,8 @@ index 0000000..9dee352
 +constexpr double kSiftEdgeThreshold = 20.0;
 +constexpr double kSiftSigma = 1.6;
 +
-+// Matching & RANSAC verification parameters (matches validated prototype)
++// Matching & RANSAC verification parameters. The 0.30 inlier ratio is a
++// provisional GM168 retune; synthetic tests do not establish live FAR/FRR.
 +constexpr double kLoweRatio = 0.80;
 +constexpr std::size_t kMinGoodMatches = 3;
 +constexpr double kRansacReprojThreshold = 4.0;
@@ -2091,7 +2092,7 @@ index 0000000..9dee352
 +constexpr double kRansacConfidence = 0.99;
 +constexpr double kMinScale = 0.80;
 +constexpr double kMaxScale = 1.25;
-+constexpr double kMinInlierRatio = 0.40;
++constexpr double kMinInlierRatio = 0.30;
 +constexpr double kTranslationConsensusRadius = 4.0;
 +
 +// Capture quality gate: 8x8 non-overlapping tiles, ignoring a 2 px border.
@@ -2449,6 +2450,32 @@ index 0000000..9dee352
 +            return -1;
 +        }
 +
++        // Fail closed on non-finite features. knnMatch() and
++        // estimateAffinePartial2D() handle NaN/Inf inputs in an
++        // OpenCV-version-specific way, so every keypoint field and descriptor
++        // value must be validated here before any matching happens. This runs
++        // before the small-set early return below on purpose: a single NaN in
++        // a one-row set is an error, not a zero-score non-match. Legitimate
++        // empty sets skip the loop and keep their score of 0.
++        for (const SigfmImgInfo *info : {frame, enrolled}) {
++            if (is_legitimate_empty(info)) {
++                continue;
++            }
++            for (const cv::KeyPoint &kp : info->keypoints) {
++                if (!is_finite_keypoint(kp)) {
++                    return -1;
++                }
++            }
++            for (int r = 0; r < info->descriptors.rows; ++r) {
++                const float *row = info->descriptors.ptr<float>(r);
++                for (int c = 0; c < info->descriptors.cols; ++c) {
++                    if (!std::isfinite(row[c])) {
++                        return -1;
++                    }
++                }
++            }
++        }
++
 +        if (frame_empty || enrolled_empty ||
 +            frame->descriptors.rows < 2 || enrolled->descriptors.rows < 2) {
 +            return 0;
@@ -2585,10 +2612,10 @@ index 0000000..9dee352
 +}
 diff --git a/libfprint/sigfm/sigfm.hpp b/libfprint/sigfm/sigfm.hpp
 new file mode 100644
-index 0000000..8b68c28
+index 0000000..8b9d004
 --- /dev/null
 +++ b/libfprint/sigfm/sigfm.hpp
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,134 @@
 +// SIGFM algorithm for libfprint
 +//
 +// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
@@ -2655,9 +2682,15 @@ index 0000000..8b68c28
 +/**
 + * @brief Score how closely a frame matches another
 + *
-+ * @param frame Print to be checked
-+ * @param enrolled Canonical print to verify against
++ * @param frame Print to be checked (probe side)
++ * @param enrolled Canonical print to verify against (template side)
 + * @return int Number of geometrically consistent inliers (>= 0), or < 0 on error
++ *
++ * The score is directional: the forward Lowe-ratio test runs frame ->
++ * enrolled only, while the reverse pass is a plain mutual-nearest-neighbour
++ * check without its own ratio test. Swapping @frame and @enrolled is
++ * therefore not guaranteed to produce the same score. Callers must always
++ * pass the probe as @frame and the enrolled template as @enrolled.
 + */
 +int sigfm_match_score(SigfmImgInfo *frame, SigfmImgInfo *enrolled);
 +
@@ -2666,6 +2699,7 @@ index 0000000..8b68c28
 + *
 + * FORWARD_ONLY disables reciprocal matching; TRANSLATION_CONSENSUS adds a
 + * post-RANSAC translation-cluster gate. Unknown flag bits are rejected.
++ * The score is directional (see sigfm_match_score()).
 + */
 +int sigfm_match_score_with_flags(SigfmImgInfo *frame, SigfmImgInfo *enrolled,
 +                                 unsigned int flags);
@@ -2718,10 +2752,10 @@ index 0000000..8b68c28
 +#endif
 diff --git a/libfprint/sigfm/tests.cpp b/libfprint/sigfm/tests.cpp
 new file mode 100644
-index 0000000..9583ee2
+index 0000000..c714c8c
 --- /dev/null
 +++ b/libfprint/sigfm/tests.cpp
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,633 @@
 +// SIGFM unit tests (synthetic, no real biometric data)
 +//
 +// Copyright (C) 2022 Matthieu CHARETTE <matthieu.charette@gmail.com>
@@ -2836,6 +2870,21 @@ index 0000000..9583ee2
 +    return info;
 +}
 +
++std::vector<cv::Point2f> transform_pts(const std::vector<cv::Point2f> &in, double scale,
++                                       double angle_deg, float tx, float ty)
++{
++    const double rad = angle_deg * (3.14159265358979323846 / 180.0);
++    const double c = std::cos(rad) * scale;
++    const double s = std::sin(rad) * scale;
++    std::vector<cv::Point2f> out;
++    out.reserve(in.size());
++    for (const auto &p : in) {
++        out.emplace_back(static_cast<float>(c * p.x - s * p.y + tx),
++                         static_cast<float>(s * p.x + c * p.y + ty));
++    }
++    return out;
++}
++
 +void write_u32_le_test(unsigned char *dst, std::uint32_t v)
 +{
 +    dst[0] = static_cast<unsigned char>(v & 0xFFU);
@@ -2905,6 +2954,54 @@ index 0000000..9583ee2
 +        kp_desc_mismatch.keypoints.emplace_back(20.0F, 20.0F, 4.0F);
 +        kp_desc_mismatch.descriptors = cv::Mat::zeros(1, 128, CV_32F);
 +        CHECK(sigfm_match_score(&kp_desc_mismatch, single_kp.get()) == -1);
++    }
++
++    TEST_CASE("non-finite keypoints and descriptors are rejected")
++    {
++        const std::vector<cv::Point2f> pts = {
++            {15.0F, 15.0F}, {45.0F, 20.0F}, {90.0F, 18.0F}, {130.0F, 25.0F},
++            {25.0F, 60.0F}, {75.0F, 55.0F}, {120.0F, 65.0F}, {20.0F, 105.0F},
++            {80.0F, 100.0F}, {135.0F, 110.0F},
++        };
++        SigfmPtr valid = make_synthetic_features(pts);
++
++        const float qnan = std::numeric_limits<float>::quiet_NaN();
++        const float pinf = std::numeric_limits<float>::infinity();
++
++        // NaN / Inf in keypoint fields (pt and size/angle/response alike)
++        SigfmPtr nan_pt = make_synthetic_features(pts);
++        nan_pt->keypoints[3].pt.x = qnan;
++        CHECK(sigfm_match_score(nan_pt.get(), valid.get()) < 0);
++        CHECK(sigfm_match_score(valid.get(), nan_pt.get()) < 0);
++
++        SigfmPtr inf_pt = make_synthetic_features(pts);
++        inf_pt->keypoints[3].pt.y = pinf;
++        CHECK(sigfm_match_score(inf_pt.get(), valid.get()) < 0);
++
++        SigfmPtr nan_size = make_synthetic_features(pts);
++        nan_size->keypoints[3].size = qnan;
++        CHECK(sigfm_match_score(nan_size.get(), valid.get()) < 0);
++
++        // NaN / Inf descriptor values
++        SigfmPtr nan_desc = make_synthetic_features(pts);
++        nan_desc->descriptors.at<float>(2, 7) = qnan;
++        CHECK(sigfm_match_score(nan_desc.get(), valid.get()) < 0);
++        CHECK(sigfm_match_score(valid.get(), nan_desc.get()) < 0);
++
++        SigfmPtr inf_desc = make_synthetic_features(pts);
++        inf_desc->descriptors.at<float>(2, 7) = -pinf;
++        CHECK(sigfm_match_score(inf_desc.get(), valid.get()) < 0);
++
++        // Non-finite data in a minimal one-row set is an error, not a
++        // zero-score non-match: the validation runs before the rows < 2 gate.
++        SigfmPtr single_kp = make_synthetic_features({{10.0F, 10.0F}});
++        single_kp->descriptors.at<float>(0, 0) = qnan;
++        CHECK(sigfm_match_score(single_kp.get(), single_kp.get()) < 0);
++
++        // Legitimate empty sets keep their score of 0.
++        SigfmPtr empty(new SigfmImgInfo());
++        CHECK(sigfm_match_score(empty.get(), valid.get()) == 0);
++        CHECK(sigfm_match_score(valid.get(), empty.get()) == 0);
 +    }
 +
 +    TEST_CASE("serialization round-trip and copy isolation")
@@ -3006,6 +3103,32 @@ index 0000000..9583ee2
 +        CHECK(sigfm_deserialize_binary(inf_desc.data(), slen) == nullptr);
 +    }
 +
++    TEST_CASE("serialize rejects keypoint counts above the SGFM v1 limit")
++    {
++        // kMaxKeypoints + 1: must fail immediately without allocating.
++        SigfmImgInfo too_many;
++        too_many.descriptors = cv::Mat::zeros(16385, 128, CV_32F);
++        for (int i = 0; i < 16385; ++i) {
++            cv::KeyPoint kp;
++            kp.pt = {1.0F, 1.0F};
++            kp.size = 4.0F;
++            kp.angle = 30.0F;
++            kp.response = 0.05F;
++            kp.octave = 0;
++            kp.class_id = -1;
++            too_many.keypoints.push_back(kp);
++        }
++        int outlen = 123;
++        CHECK(sigfm_serialize_binary(&too_many, &outlen) == nullptr);
++        CHECK(outlen == 0);
++
++        // NULL outlen is an error and must not crash on a valid info.
++        cv::Mat pat = make_synthetic_pattern(64, 64, 7);
++        SigfmPtr info(sigfm_extract(pat.data, pat.cols, pat.rows));
++        REQUIRE(info != nullptr);
++        CHECK(sigfm_serialize_binary(info.get(), nullptr) == nullptr);
++    }
++
 +    TEST_CASE("genuine transformed pattern vs different synthetic pattern")
 +    {
 +        cv::Mat img_a = make_synthetic_pattern(160, 128, 2026);
@@ -3046,20 +3169,6 @@ index 0000000..9583ee2
 +            {15.0F, 15.0F}, {45.0F, 20.0F}, {90.0F, 18.0F}, {130.0F, 25.0F}, {25.0F, 60.0F},
 +            {75.0F, 55.0F}, {120.0F, 65.0F}, {20.0F, 105.0F}, {80.0F, 100.0F}, {135.0F, 110.0F},
 +        };
-+        auto transform_pts = [](const std::vector<cv::Point2f> &in, double scale,
-+                                double angle_deg, float tx, float ty) {
-+            const double rad = angle_deg * (3.14159265358979323846 / 180.0);
-+            const double c = std::cos(rad) * scale;
-+            const double s = std::sin(rad) * scale;
-+            std::vector<cv::Point2f> out;
-+            out.reserve(in.size());
-+            for (const auto &p : in) {
-+                out.emplace_back(static_cast<float>(c * p.x - s * p.y + tx),
-+                                 static_cast<float>(s * p.x + c * p.y + ty));
-+            }
-+            return out;
-+        };
-+
 +        SigfmPtr ref = make_synthetic_features(base_pts);
 +
 +        // Valid scale (1.10) + rotation + translation -> all 10 inliers
@@ -3077,26 +3186,58 @@ index 0000000..9583ee2
 +        cv::setRNGSeed(42);
 +        CHECK(sigfm_match_score(ref.get(), too_small.get()) == 0);
 +
-+        // Low inlier_ratio (< 0.40): 4 consistent + 8 scrambled = 12 good matches, ratio = 4/12 = 0.333 -> 0
-+        std::vector<cv::Point2f> pts12 = base_pts;
-+        pts12.emplace_back(50.0F, 85.0F);
-+        pts12.emplace_back(105.0F, 40.0F);
-+        std::vector<cv::Point2f> pts12_low_ratio = transform_pts(pts12, 1.0, 5.0, 4.0F, 3.0F);
-+        // Scramble 8 points with large non-affine offsets (> 25 px)
++        // Low inlier_ratio (< 0.30): 4 consistent + 10 scrambled = 14 good
++        // matches, ratio = 4/14 = 0.286 -> 0
++        std::vector<cv::Point2f> pts14(base_pts.begin(), base_pts.begin() + 4);
++        pts14.emplace_back(50.0F, 85.0F);
++        pts14.emplace_back(105.0F, 40.0F);
++        pts14.emplace_back(30.0F, 30.0F);
++        pts14.emplace_back(95.0F, 90.0F);
++        pts14.emplace_back(60.0F, 15.0F);
++        pts14.emplace_back(15.0F, 80.0F);
++        pts14.emplace_back(110.0F, 55.0F);
++        pts14.emplace_back(70.0F, 40.0F);
++        pts14.emplace_back(40.0F, 95.0F);
++        pts14.emplace_back(125.0F, 80.0F);
++        std::vector<cv::Point2f> pts14_low_ratio = transform_pts(pts14, 1.0, 5.0, 4.0F, 3.0F);
++        // Scramble the 10 extra points with large non-affine offsets (> 25 px)
 +        const std::vector<cv::Point2f> offsets = {
 +            {40.0F, -30.0F}, {-35.0F, 45.0F}, {55.0F, 30.0F}, {-40.0F, -35.0F},
 +            {28.0F, 50.0F}, {-50.0F, 15.0F}, {35.0F, -45.0F}, {-25.0F, 40.0F},
++            {45.0F, 20.0F}, {-30.0F, -50.0F},
 +        };
-+        for (std::size_t i = 4; i < 12; ++i) {
-+            pts12_low_ratio[i].x += offsets[i - 4].x;
-+            pts12_low_ratio[i].y += offsets[i - 4].y;
++        for (std::size_t i = 4; i < 14; ++i) {
++            pts14_low_ratio[i].x += offsets[i - 4].x;
++            pts14_low_ratio[i].y += offsets[i - 4].y;
 +        }
-+        SigfmPtr f_src12 = make_synthetic_features(pts12);
-+        SigfmPtr f_low = make_synthetic_features(pts12_low_ratio);
++        SigfmPtr f_src14 = make_synthetic_features(pts14);
++        SigfmPtr f_low = make_synthetic_features(pts14_low_ratio);
 +        cv::setRNGSeed(42);
-+        CHECK(sigfm_match_score(f_src12.get(), f_low.get()) == 0);
++        CHECK(sigfm_match_score(f_src14.get(), f_low.get()) == 0);
 +
-+        // Boundary pass (ratio >= 0.40): 5 consistent + 5 scrambled = 10 good matches, ratio = 0.50 -> 5
++        // Exact boundary (ratio == 0.30): 3 consistent + 7 scrambled = 10 good
++        // matches, ratio = 3/10 = 0.30. The gate is inclusive, so this passes
++        // and scores exactly the 3 consistent inliers.
++        std::vector<cv::Point2f> pts10 = base_pts;
++        pts10.resize(3);
++        pts10.emplace_back(50.0F, 85.0F);
++        pts10.emplace_back(105.0F, 40.0F);
++        pts10.emplace_back(30.0F, 30.0F);
++        pts10.emplace_back(95.0F, 90.0F);
++        pts10.emplace_back(60.0F, 15.0F);
++        pts10.emplace_back(15.0F, 80.0F);
++        pts10.emplace_back(110.0F, 55.0F);
++        std::vector<cv::Point2f> pts10_boundary = transform_pts(pts10, 1.0, 5.0, 4.0F, 3.0F);
++        for (std::size_t i = 3; i < 10; ++i) {
++            pts10_boundary[i].x += offsets[i - 3].x;
++            pts10_boundary[i].y += offsets[i - 3].y;
++        }
++        SigfmPtr f_src10 = make_synthetic_features(pts10);
++        SigfmPtr f_boundary = make_synthetic_features(pts10_boundary);
++        cv::setRNGSeed(42);
++        CHECK(sigfm_match_score(f_src10.get(), f_boundary.get()) == 3);
++
++        // Boundary pass (ratio >= 0.30): 5 consistent + 5 scrambled = 10 good matches, ratio = 0.50 -> 5
 +        std::vector<cv::Point2f> pts10_half = transform_pts(base_pts, 1.0, 5.0, 4.0F, 3.0F);
 +        for (std::size_t i = 5; i < 10; ++i) {
 +            pts10_half[i].x += offsets[i - 5].x;
@@ -3105,6 +3246,26 @@ index 0000000..9583ee2
 +        SigfmPtr f_half = make_synthetic_features(pts10_half);
 +        cv::setRNGSeed(42);
 +        CHECK(sigfm_match_score(ref.get(), f_half.get()) == 5);
++    }
++
++    TEST_CASE("RANSAC scale boundaries are inclusive")
++    {
++        const std::vector<cv::Point2f> base_pts = {
++            {15.0F, 15.0F}, {45.0F, 20.0F}, {90.0F, 18.0F}, {130.0F, 25.0F}, {25.0F, 60.0F},
++            {75.0F, 55.0F}, {120.0F, 65.0F}, {20.0F, 105.0F}, {80.0F, 100.0F}, {135.0F, 110.0F},
++        };
++        SigfmPtr ref = make_synthetic_features(base_pts);
++
++        // Exact similarity transforms at the inclusive gate bounds. All 10
++        // descriptor pairs are identical (ratio 0), so the model fit is exact
++        // and the inlier count is deterministic for any RNG seed.
++        SigfmPtr s080 = make_synthetic_features(transform_pts(base_pts, 0.80, 10.0, 5.0F, -3.0F));
++        SigfmPtr s125 = make_synthetic_features(transform_pts(base_pts, 1.25, -10.0, -5.0F, 3.0F));
++
++        cv::setRNGSeed(42);
++        CHECK(sigfm_match_score(ref.get(), s080.get()) == 10);
++        cv::setRNGSeed(42);
++        CHECK(sigfm_match_score(ref.get(), s125.get()) == 10);
 +    }
 +
 +    TEST_CASE("reciprocal matching rejects many-to-one ratio candidates")
@@ -3138,6 +3299,15 @@ index 0000000..9583ee2
 +            probe->descriptors.at<float>(5 + i, 30 + i) = 0.01F * (i + 1);
 +        }
 +
++        // Without reciprocal filtering all 12 ratio-passing candidates reach
++        // RANSAC. Max-inlier selection prefers the 8-way degenerate consensus
++        // (every junk match maps onto the single enrolled point {140,100})
++        // over the 5-point genuine similarity, and the resulting near-zero
++        // scale of that degenerate model is rejected by the 0.80 scale gate,
++        // so the score is 0. This outcome relies on RANSAC preferring the
++        // largest consensus; the reciprocal default below is the primary
++        // assertion because it is deterministic by construction: only the 5
++        // mutual-NN pairs survive and score exactly 5.
 +        cv::setRNGSeed(42);
 +        CHECK(sigfm_match_score_with_flags(
 +                  probe.get(), enrolled.get(), SIGFM_MATCH_FLAG_FORWARD_ONLY) == 0);
@@ -3171,6 +3341,30 @@ index 0000000..9583ee2
 +        }
 +        // 9 columns * 7 rows of complete 8x8 tiles inside the 2 px border.
 +        CHECK(sigfm_image_coverage(blank.data, 80, 64) == doctest::Approx(1.0 / 63.0));
++    }
++
++    TEST_CASE("coverage counts the last full tile and ignores trailing partial area")
++    {
++        // 80x64 with a 2 px border leaves tiles at x in {2..66}, y in {2..50}:
++        // 9 columns * 7 rows = 63 complete 8x8 tiles.
++        // Texture only inside the last complete tile (origin 66,50).
++        cv::Mat last(64, 80, CV_8UC1, cv::Scalar(128));
++        for (int y = 50; y < 58; ++y) {
++            for (int x = 66; x < 74; ++x) {
++                last.at<unsigned char>(y, x) = ((x + y) & 1) ? 255 : 0;
++            }
++        }
++        CHECK(sigfm_image_coverage(last.data, 80, 64) == doctest::Approx(1.0 / 63.0));
++
++        // The same contrast straddling the right edge (x 74..79) lies outside
++        // every complete tile, so it must not register as coverage.
++        cv::Mat trailing(64, 80, CV_8UC1, cv::Scalar(128));
++        for (int y = 2; y < 10; ++y) {
++            for (int x = 74; x < 80; ++x) {
++                trailing.at<unsigned char>(y, x) = ((x + y) & 1) ? 255 : 0;
++            }
++        }
++        CHECK(sigfm_image_coverage(trailing.data, 80, 64) == 0.0);
 +    }
 +
 +    TEST_CASE("translation consensus is an opt-in A/B variant")

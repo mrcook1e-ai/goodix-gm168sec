@@ -1,0 +1,188 @@
+name: Release RPM
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  build:
+    name: Build RPM (Fedora 45)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:45
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+    steps:
+      - name: Install git and tar
+        run: |
+          dnf install -y --setopt=install_weak_deps=False git-core tar
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Mark git directory safe
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            meson \
+            ninja-build \
+            pkgconf-pkg-config \
+            gcc \
+            gcc-c++ \
+            patch \
+            diffutils \
+            glib2-devel \
+            libgusb-devel \
+            pixman-devel \
+            openssl3-devel \
+            opencv-devel \
+            doctest-devel \
+            cairo-devel \
+            systemd-devel \
+            systemd-rpm-macros \
+            systemd-udev \
+            redhat-rpm-config \
+            rpm-build \
+            bzip2
+
+      - name: Verify toolchain and OpenSSL 3 policy
+        run: |
+          pkg-config --modversion openssl
+          pkg-config --modversion opencv4
+          gcc --version
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version="$(awk '/^Version:/ { print $2; exit }' packaging/fedora/libfprint-goodix-gm168.spec)"
+            case "$GITHUB_REF_NAME" in
+              "v${version}"|"v${version}"-*) ;;
+              *)
+                echo "FAIL: tag $GITHUB_REF_NAME does not match RPM version $version" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+      - name: Build RPM and SRPM
+        run: |
+          ./packaging/fedora/build-rpm.sh ./dist
+
+      - name: Verify RPM metadata
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c SHA256SUMS)
+          shopt -s nullglob
+          bin_rpms=(dist/*.x86_64.rpm)
+          src_rpms=(dist/*.src.rpm)
+          if ((${#bin_rpms[@]} != 1 || ${#src_rpms[@]} != 1)); then
+            echo "FAIL: expected exactly one x86_64 RPM and one SRPM" >&2
+            exit 1
+          fi
+          bin_rpm="${bin_rpms[0]}"
+
+          # Capture rpm output once: grep -q in a pipe can give rpm SIGPIPE
+          # under pipefail even when the expected entry is present.
+          rpm_conflicts="$(rpm -qp --conflicts "$bin_rpm")"
+          rpm_provides="$(rpm -qp --provides "$bin_rpm")"
+          rpm_requires="$(rpm -qp --requires "$bin_rpm")"
+          rpm_files="$(rpm -qlp "$bin_rpm")"
+
+          # No Conflicts/Provides against the system libfprint package.
+          if grep -qi 'libfprint' <<< "$rpm_conflicts"; then
+            echo "FAIL: RPM must not Conflicts: libfprint" >&2
+            exit 1
+          fi
+          if grep -Eq '^libfprint-2\.so|^libfprint([[:space:]]|\(x86-64\)|-devel)' <<< "$rpm_provides"; then
+            echo "FAIL: RPM must not advertise system libfprint provides" >&2
+            exit 1
+          fi
+
+          # Automatic Requires must remain (private OpenSSL 3 linkage).
+          if ! grep -q 'libssl\.so\.3' <<< "$rpm_requires"; then
+            echo "FAIL: missing automatic libssl.so.3 Requires" >&2
+            exit 1
+          fi
+
+          # No /usr libfprint artifacts; private runtime present.
+          if grep -q '^/usr/lib64/libfprint' <<< "$rpm_files"; then
+            echo "FAIL: RPM installs into /usr/lib64" >&2
+            exit 1
+          fi
+          if ! grep -q '^/opt/libfprint-gm168/lib64/libfprint-2\.so\.2' <<< "$rpm_files"; then
+            echo "FAIL: private libfprint-2.so.2 missing" >&2
+            exit 1
+          fi
+          if grep -q '^/opt/libfprint-gm168/lib64/libfprint-2\.so$' <<< "$rpm_files"; then
+            echo "FAIL: unversioned libfprint-2.so symlink must not be shipped" >&2
+            exit 1
+          fi
+
+          # Drop-in, udev rule and private state directory present.
+          for required_file in \
+            /usr/lib/systemd/system/fprintd.service.d/60-goodix-gm168-rpm.conf \
+            /usr/lib/udev/rules.d/70-goodix-gm168.rules \
+            /etc/goodix-gm168
+          do
+            if ! grep -Fxq "$required_file" <<< "$rpm_files"; then
+              echo "FAIL: required path missing: $required_file" >&2
+              exit 1
+            fi
+          done
+
+          echo "RPM metadata checks OK: $(basename "$bin_rpm")"
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: gm168-rpm
+          path: |
+            dist/*.rpm
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Publish prerelease
+    needs: build
+    # Only tag pushes publish a release; workflow_dispatch is build-only.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download RPM artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: gm168-rpm
+          path: dist
+
+      - name: Create or update prerelease
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          assets=(dist/*.rpm dist/SHA256SUMS)
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Release already exists: keep it a prerelease and refresh assets.
+            gh release edit "$tag" --prerelease --verify-tag
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            # Tag is already pushed; --verify-tag guards against races.
+            gh release create "$tag" "${assets[@]}" \
+              --title "$tag" \
+              --prerelease \
+              --generate-notes \
+              --verify-tag
+          fi
+
+          gh release view "$tag" --json tagName,isPrerelease,assets \
+            --jq '.tagName + " prerelease=" + (.isPrerelease|tostring) + " assets=" + ([.assets[].name] | join(", "))'
