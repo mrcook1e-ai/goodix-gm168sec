@@ -6,12 +6,13 @@ This repository is a public source overlay for the experimental **Goodix GM168SE
 
 Keep changes strictly separated by responsibility:
 
-- `driver/` — Canonical C11 driver sources and headers (`goodix_gm168.c`, `goodix_proto.{c,h}`, `goodix_tls.{c,h}`, `gm168_psk_recovery.{c,h}`, `gm168_frame_layout.h`, `gm168_timeouts.h`, `gm168_usb_errors.h`, `gm168_trace.h`, `gm168_log.{c,h}`). Copied directly into `libfprint/drivers/goodix_gm168/` by `tools/apply-overlay.sh`.
+- `driver/` — Canonical C11 driver sources and headers (`goodix_gm168.c`, `goodix_proto.{c,h}`, `goodix_tls.{c,h}`, `gm168_psk_recovery.{c,h}`, `gm168_frame_layout.h`, `gm168_capture_policy.h` (pure capture-selection policy: BG minimum mean, dual-frame pick, pre-stretch raw rank), `gm168_lifecycle.h`, `gm168_timeouts.h`, `gm168_usb_errors.h`, `gm168_trace.h`, `gm168_log.{c,h}`). Copied directly into `libfprint/drivers/goodix_gm168/` by `tools/apply-overlay.sh`.
 - `patches/libfprint-v1.94.100-integration.patch` — Integration patch against pinned upstream `libfprint v1.94.100` (`80a4b5ec612892c5c056c48dddaa561452cf37ec`). Houses `libfprint/sigfm/*`, core `FPI_PRINT_SIGFM` hooks, `tests/test-fpi-sigfm.c`, `tests/test-goodix-gm168-frame-layout.c`, OpenSSL 3 build policy (`>= 3.0, < 4.0`), `libfprint/meson.build` / `tests/meson.build` driver wiring, and `fprint-list-udev-hwdb.c` allowlist cleanup.
 - `tools/apply-overlay.sh` — Enforces clean `v1.94.100` target checkout, copies `driver/*` and `tests/test-goodix-gm168-psk-recovery.c`, checks and applies `patches/libfprint-v1.94.100-integration.patch`.
-- `tests/` — Standalone compile-time timeout contract check (`tests/test_timeouts.c`). PSK recovery tests (`tests/test-goodix-gm168-psk-recovery.c`), SIGFM tests (`tests/test-fpi-sigfm.c`, `libfprint/sigfm/tests.cpp`), and the packed-frame layout test (`tests/test-goodix-gm168-frame-layout.c`) run inside the patched `libfprint` build tree.
-- `packaging/` — Udev `uaccess` rule (`packaging/udev/70-goodix-gm168.rules`) and experimental Fedora RPM spec (`packaging/fedora/libfprint-goodix-gm168.spec`).
-- `docs/` & root policies (`README.md`, `INSTALL.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`) — Curated technical documentation and safety boundaries.
+- `tests/` — Standalone compile-time timeout/background contract plus runtime checks (`tests/test_timeouts.c`): `_Static_assert` pins on `driver/gm168_timeouts.h` (including the `GM168_CAPTURE_SETTLE_MS` default and clamp range) and `GM168_BG_MIN_MEAN_DEFAULT` from `driver/gm168_capture_policy.h`, the runtime cancellation-lifecycle predicate matrix, and synthetic-buffer runtime checks of the dual-frame pick (`gm168_dual_pick`), effective rank (`gm168_effective_rank`), and raw rank (`gm168_raw_rank`) helpers. PSK recovery tests (`tests/test-goodix-gm168-psk-recovery.c`), SIGFM tests (`tests/test-fpi-sigfm.c`, `libfprint/sigfm/tests.cpp`), and the packed-frame layout test (`tests/test-goodix-gm168-frame-layout.c`) run inside the patched `libfprint` build tree.
+- `packaging/` — Udev `uaccess` rule (`packaging/udev/70-goodix-gm168.rules`), isolated Fedora 45 RPM spec (`packaging/fedora/libfprint-goodix-gm168.spec`), reproducible RPM helper (`packaging/fedora/build-rpm.sh`), and `fprintd` drop-in (`packaging/fedora/fprintd-goodix-gm168.conf`). The RPM keeps the private library in `/opt/libfprint-gm168` and must not replace/provide/conflict with system `libfprint`.
+- `.github/workflows/release-rpm.yml` — Fedora 45 container build, offline RPM checks/artifacts, and `v*` tag prerelease publication. CI never performs live hardware validation.
+- `docs/` & root policies (`README.md` (English), `README.ru.md` (Russian), `INSTALL.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`) — Curated technical documentation and safety boundaries. Keep both user guides synchronized and retain the RU/EN language switch and complete credits.
 
 Never recreate legacy `src/`, `gm168_cal.h`, Windows Frida/unseal scripts, or experimental `10019` / `0xE0` flash scripts in this repository.
 
@@ -58,7 +59,7 @@ meson test -C ./build \
 # Full meson suite (expect all enabled targets OK; disabled drivers skipped)
 meson test -C ./build --print-errorlogs
 
-# Standalone timeout _Static_assert check
+# Standalone timeout _Static_assert + cancellation-lifecycle contract check
 cc -std=c11 -Wall -Wextra -Werror -Idriver tests/test_timeouts.c -o /tmp/test_timeouts
 /tmp/test_timeouts
 rm -f /tmp/test_timeouts
@@ -66,6 +67,21 @@ rm -f /tmp/test_timeouts
 # Patch / whitespace sanity in the overlay repo
 git diff --check
 ```
+
+For Fedora packaging or release-workflow changes, additionally build without
+installing the result and inspect its metadata/contents:
+
+```bash
+./packaging/fedora/build-rpm.sh ./dist
+(cd ./dist && sha256sum -c SHA256SUMS)
+rpm -qpi ./dist/*x86_64.rpm
+rpm -qpl ./dist/*x86_64.rpm
+```
+
+The binary RPM must contain only the private `/opt/libfprint-gm168` library
+runtime, documentation, the udev rule, and the scoped `fprintd` drop-in—never a
+system `/usr/lib*/libfprint` replacement, global `ldconfig` override, PSK,
+calibration file, or live-hardware artifact.
 
 ### 3. Memory and Zeroization Checks
 
@@ -139,6 +155,6 @@ All unit tests and KATs must use strictly synthetic inputs and fixtures.
 
 ## Documentation Synchronization Rules
 
-- Whenever state machines, protocol constants, PSK recovery gates, SIGFM parameters, or build/test procedures change, update the matching documents under `docs/` (`README.md`, `ARCHITECTURE.md`, `STATE-MACHINES.md`, `PROTOCOL.md`, `PSK-RECOVERY.md`, `IMAGE-PIPELINE.md`, `SIGFM.md`, `TESTING.md`, `DEVELOPMENT.md`, `SECURITY.md`, `FAQ.md`), root `README.md`, `INSTALL.md`, `CHANGELOG.md`, and `AGENTS.md`.
+- Whenever state machines, protocol constants, PSK recovery gates, SIGFM parameters, or build/test procedures change, update the matching documents under `docs/` (`README.md`, `ARCHITECTURE.md`, `STATE-MACHINES.md`, `PROTOCOL.md`, `PSK-RECOVERY.md`, `IMAGE-PIPELINE.md`, `SIGFM.md`, `TESTING.md`, `DEVELOPMENT.md`, `SECURITY.md`, `FAQ.md`), root `README.md` / `README.ru.md`, `INSTALL.md`, `CHANGELOG.md`, and `AGENTS.md`.
 - Always distinguish **offline synthetic proof** from **live hardware proof**.
 - Never fabricate hardware support, firmware compatibility, suspend/resume reliability, or FAR/FRR claims; document all unvalidated boundaries explicitly.

@@ -1,197 +1,127 @@
 <h1>
-  <img src="assets/brand/header.svg" alt="GM168SEC — Goodix libfprint driver overlay" width="100%">
+  <img src="assets/brand/header.svg" alt="GM168SEC — Goodix libfprint driver" width="100%">
 </h1>
 
-<p>
-  <strong>English</strong> · <a href="README.ru.md">Русский</a>
-</p>
+<p><strong>English</strong> · <a href="README.ru.md">Русский</a></p>
 
-<p>
-  Experimental <a href="https://gitlab.freedesktop.org/libfprint/libfprint">libfprint</a>
-  driver for the <strong>Goodix GM168SEC</strong> capacitive fingerprint sensor,<br>
-  with SIGFM matching and read-only in-memory PSK recovery.
-</p>
+<p>Linux driver for the <strong>Goodix GM168SEC</strong> fingerprint reader (<code>27c6:589a</code>).<br>It works through <code>libfprint</code> and <code>fprintd</code>, using OpenSSL 3 and SIGFM.</p>
 
-<p><a href="https://github.com/mrcook1e-ai/goodix-gm168sec/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mrcook1e-ai/goodix-gm168sec/ci.yml?style=flat-square&amp;label=CI" alt="CI: Ubuntu 24.04 &amp; Fedora 45"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-LGPL--2.1--or--later-0E7490?style=flat-square" alt="License: LGPL-2.1-or-later"></a> <a href="patches/libfprint-v1.94.100-integration.patch"><img src="https://img.shields.io/badge/libfprint-v1.94.100-334155?style=flat-square" alt="libfprint v1.94.100"></a> <a href="INSTALL.md"><img src="https://img.shields.io/badge/OpenSSL-3.x-0F766E?style=flat-square" alt="OpenSSL 3"></a> <a href="#status"><img src="https://img.shields.io/badge/status-developer_preview-B45309?style=flat-square" alt="Status: developer preview"></a></p>
+<p><a href="https://github.com/mrcook1e-ai/goodix-gm168sec/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mrcook1e-ai/goodix-gm168sec/ci.yml?style=flat-square&amp;label=CI" alt="CI status"></a> <a href="https://github.com/mrcook1e-ai/goodix-gm168sec/releases"><img src="https://img.shields.io/badge/Fedora_45-RPM-050505?style=flat-square&amp;labelColor=2A2A2A" alt="Fedora 45 RPM release"></a> <a href="LICENSE"><img src="https://img.shields.io/badge/license-LGPL--2.1--or--later-050505?style=flat-square&amp;labelColor=2A2A2A" alt="License: LGPL-2.1-or-later"></a></p>
 
-<p>
-  <a href="docs/README.md"><strong>Documentation</strong></a> ·
-  <a href="#quick-start-isolated-build--tests">Build &amp; test</a> ·
-  <a href="docs/BRANDING.md">Brand</a> ·
-  <a href="CONTRIBUTING.md">Contribute</a> ·
-  <a href="https://deepwiki.com/mrcook1e-ai/goodix-gm168sec">DeepWiki</a>
-</p>
+<p><a href="docs/README.md"><strong>Documentation</strong></a> · <a href="docs/BRANDING.md">Brand</a> · <a href="CONTRIBUTING.md">Contribute</a></p>
 
-## Status
+> This is an experimental project. The only confirmed device is `27c6:589a`
+> running `GFUSB_GM168SEC_APP_10036`. Keep password authentication enabled.
 
-**Community developer preview — not production-ready and not upstream-ready.**
+## Install on Fedora 45 (x86_64)
 
-- **Confirmed hardware / firmware**: USB `27c6:589a` with firmware
-  `GFUSB_GM168SEC_APP_10036` (the only currently confirmed firmware revision).
-- **Platform tested**: Fedora 45 with OpenSSL 3 (`openssl3-devel` /
-  `openssl >= 3.0, < 4.0`).
-- **Matching pipeline**: `FPI_PRINT_SIGFM` (OpenCV SIFT + reciprocal matching +
-  RANSAC affine check) instead of NBIS, using 20 enrollment stages with
-  anti-duplicate filtering, a keypoint/coverage quality gate, deferred teardown,
-  bounded verify auto-retry, and a 2x bilinear upscale to `160x128`.
-- **Background & calibration**: dynamic 5-frame dark background capture and
-  subtraction works out of the box without per-device calibration files.
-  Optional per-device Windows calibration files (`calib_windows.dat`,
-  `cal_scale.bin`) are supported if provided locally, but are never required or
-  distributed.
-- **Limitations**: evaluated only on limited hardware and a small sample set for
-  false accept / false reject behavior. Cross-device compatibility, other
-  firmware revisions, hotplug behavior, and suspend/resume lifecycle are not
-  broadly validated and should not be assumed production-ready. Always keep a
-  password authentication fallback configured. The latest reciprocal/quality/
-  lifecycle changes have offline synthetic proof only; earlier live results do
-  not validate this revision.
+No build is required:
 
-## AI-assisted development and "as is" notice
+1. Download **`libfprint-goodix-gm168-0.2.0-...fc45.x86_64.rpm`** from the
+   [Releases page](https://github.com/mrcook1e-ai/goodix-gm168sec/releases).
+2. Install it:
 
-Substantial portions of the reverse engineering, implementation, testing, and
-documentation in this project were produced with AI coding assistance under
-human review and direction. The code has been exercised on limited test hardware
-and has not undergone an independent security or correctness audit.
+   ```bash
+   sudo dnf install ./libfprint-goodix-gm168-0.2.0-*.fc45.x86_64.rpm
+   ```
 
-This project is provided **"as is", without warranty of any kind** under the
-GNU Lesser General Public License v2.1 or later. See [`LICENSE`](LICENSE) and
-[`NOTICE`](NOTICE).
+3. Reconnect the reader if it is external. Then enroll a finger through your
+   desktop settings or run:
 
-## Repository layout
+   ```bash
+   fprintd-enroll -f right-thumb
+   ```
 
-- `driver/` — libfprint `goodix_gm168` driver C sources and headers
-- `patches/` — integration patch for pinned libfprint `v1.94.100` (SIGFM core,
-  tests, OpenSSL 3 build policy, and udev/hwdb whitelist fix)
-- `tools/apply-overlay.sh` — verifies a clean pinned `libfprint v1.94.100`
-  checkout, copies the driver and synthetic recovery test, and applies the patch
-- `tests/` — timeout contract and synthetic DPAPI/TLV/OpenSSL recovery tests
-- `packaging/` — udev `uaccess` rule and experimental Fedora RPM spec
-- `assets/brand/` — local Secure Signal SVG artwork and GitHub social preview
-- `docs/` — curated architecture, protocol, RE, SIGFM, recovery, and testing guides
+4. Test verification:
 
-No proprietary binaries, firmware images, Windows driver files, per-device PSKs,
-calibration tables, biometric samples, or packet captures are included.
+   ```bash
+   fprintd-verify -f right-thumb
+   ```
 
-## Quick start (isolated build & tests)
+The RPM installs the udev rule and configures `fprintd`. If `fprintd` is already
+running, the installer restarts it.
 
-See [`INSTALL.md`](INSTALL.md) for full prerequisites and details.
+### Important notes
+
+- The system `libfprint` is **not replaced**. This driver is installed separately
+  under `/opt/libfprint-gm168`, and the override applies only to `fprintd.service`.
+- This build contains the **GM168 driver only**. While the package is installed,
+  do not use the same `fprintd` instance with other fingerprint reader models.
+- Old NBIS templates are incompatible with SIGFM. If a finger was enrolled with
+  an older driver, delete its template and enroll again:
+
+  ```bash
+  fprintd-delete "$USER"
+  fprintd-enroll -f right-thumb
+  ```
+
+## PSK and Windows
+
+If `/etc/goodix-gm168/psk.bin` is absent, the driver attempts to read the existing
+sensor key and uses it only in memory. A separate Windows setup or manual key
+recovery is normally unnecessary.
+
+Re-provisioning the reader under Windows can change its key. If you have your own
+`psk.bin`, keep it private. Never upload it to issues or publish it together with
+logs, calibration files, or fingerprint images.
+
+Details: [PSK recovery](docs/PSK-RECOVERY.md) and [FAQ](docs/FAQ.md).
+
+## Uninstall
 
 ```bash
-git clone --branch v1.94.100 --depth 1 \
-  https://gitlab.freedesktop.org/libfprint/libfprint.git
-
-./tools/apply-overlay.sh ./libfprint
-
-meson setup build ./libfprint \
-  --prefix="$PWD/prefix" \
-  -Ddrivers=goodix_gm168 \
-  -Dgtk-examples=false \
-  -Ddoc=false \
-  -Dinstalled-tests=false
-
-meson compile -C build
-meson test -C build --print-errorlogs
+sudo dnf remove libfprint-goodix-gm168
 ```
 
-`tools/apply-overlay.sh` refuses a dirty checkout or any commit other than
-`80a4b5ec612892c5c056c48dddaa561452cf37ec` (`v1.94.100`).
+After removal, `fprintd` uses the system `libfprint` again. The package does not
+delete files in `/etc/goodix-gm168` or stored fingerprint templates.
 
-## PSK loading and read-only recovery
+## Current status
 
-The sensor enforces a TLS 1.2 PSK handshake (`PSK-AES128-CBC-SHA256`) using a
-**device-specific** 32-byte key provisioned on the sensor.
+On one device, after a full template reset, the current build completed a live
+smoke test: `right-thumb` enrollment finished all `20/20` stages, and all five
+verification sessions matched — four on the first touch and one after a retry.
+No TLS or watchdog errors occurred in this short series.
 
-- If `psk.bin` exists, the driver reads it from `/etc/goodix-gm168/psk.bin` or
-  `$GOODIX_GM168_DIR/psk.bin` and verifies its SHA-256 against the sensor before
-  starting TLS. Keep the file at mode `0600` in a private `0700` directory.
-- If the file is absent, the driver performs bounded, read-only recovery of the
-  existing key: it reads a fresh sensor hash, discovers the DPAPI v1 record
-  length dynamically, decrypts the adjacent white-box record, and verifies the
-  recovered key against that fresh hash before starting TLS. This path is
-  currently validated only for `GFUSB_GM168SEC_APP_10036`.
-- Recovery uses the key **in memory only**. It does not write `psk.bin` or
-  `sealed.bin`, provision a new key, rotate the sensor key, or retry after a
-  malformed response, hash mismatch, or TLS failure.
-- An existing unreadable, malformed, or mismatching `psk.bin` fails activation;
-  it is not silently ignored or overwritten. Move a known-stale file aside
-  deliberately if you want to retry recovery from the sensor.
-- Re-provisioning the reader under Windows can change the device PSK. Back up
-  your own `psk.bin` securely and **never** commit or attach PSKs, hashes, DPAPI
-  data, or calibration files to public issues.
+This is a result from **one device and a small number of touches**, not a FAR/FRR
+measurement or a guarantee for other readers. Other firmware versions,
+suspend/resume, and broad compatibility remain unvalidated.
 
-## Architecture at a glance
+## Source builds and technical details
 
-```text
-  +-----------------------------------------------------------------+
-  |                  libfprint Core (FpiPrint / FpiSsm)             |
-  +-----------------------------------------------------------------+
-             |                                             ^
-             | (Async USB I/O & Handshake)                 | (Match / Score)
-             v                                             |
-  +----------------------------------+             +----------------+
-  |       goodix_gm168 Driver        |             | FPI_PRINT_SIGFM|
-  |  - Async USB & FpiSsm sequences  |             | - SIFT detector|
-  |  - TLS 1.2 PSK Server (OpenSSL 3)|             | - RANSAC affine|
-  |  - In-memory read-only recovery  |             | - 20-stage SGFM|
-  +----------------------------------+             +----------------+
-             |                                             ^
-             v (Packed 12-bit sensor frames)               | (160x128 frame)
-  +-----------------------------------------------------------------+
-  |  Image Pipeline: 80x64 unpack -> Dynamic dark bg subtraction    |
-  +-----------------------------------------------------------------+
-```
+Fedora users only need the RPM above. To inspect the implementation or contribute:
 
-## Documentation library: meet the sensor, layer by layer
+- [INSTALL.md](INSTALL.md) — dependencies, source builds, and local RPM builds;
+- [docs/README.md](docs/README.md) — the complete technical documentation hub;
+- [Architecture](docs/ARCHITECTURE.md) and [state machines](docs/STATE-MACHINES.md);
+- [USB/TLS protocol](docs/PROTOCOL.md);
+- [Image pipeline](docs/IMAGE-PIPELINE.md);
+- [SIGFM matching](docs/SIGFM.md);
+- [Testing](docs/TESTING.md) and [development](docs/DEVELOPMENT.md).
 
-Start with the **[documentation hub](docs/README.md)** or continue to the
-**[DeepWiki guide](https://deepwiki.com/mrcook1e-ai/goodix-gm168sec)**. The library
-is organized as a learning path rather than a collection of disconnected notes.
+Contribution rules: [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports:
+[Issues](https://github.com/mrcook1e-ai/goodix-gm168sec/issues). Do not attach
+keys, templates, calibration files, fingerprint images, or USB captures.
 
-| Step | Read | What you will learn |
-|---:|---|---|
-| 1 | [**Reverse engineering**](docs/REVERSE-ENGINEERING.md) | How Binary Ninja, dynamic analysis, USB behavior, and synthetic differential tests established the protocol without shipping proprietary artifacts. |
-| 2 | [**Architecture**](docs/ARCHITECTURE.md) · [**State machines**](docs/STATE-MACHINES.md) | How asynchronous USB, `FpiSsm`, the OpenSSL thread, cancellation, deadlines, and the TLS fast path fit together. |
-| 3 | [**USB & TLS protocol**](docs/PROTOCOL.md) | What `A0`/`B0`/`B2` frames carry, how ACK flags work, and why the host runs a legacy TLS-PSK server. |
-| 4 | [**Image pipeline**](docs/IMAGE-PIPELINE.md) | How packed 12-bit sensor rows become an `80x64` frame, then a calibrated/background-corrected `160x128` image. |
-| 5 | [**SIGFM matching**](docs/SIGFM.md) | Why SIFT + RANSAC replaced NBIS, how `SGFM v1` integrates with libfprint, and what the 20 enrollment stages do. |
-| 6 | [**PSK recovery**](docs/PSK-RECOVERY.md) | How dynamic DPAPI parsing, white-box decryption, and fresh-hash verification recover an existing key read-only into memory. |
-| 7 | [**Testing**](docs/TESTING.md) · [**Development**](docs/DEVELOPMENT.md) | How to reproduce offline proofs, run memory checks, maintain the overlay, and prepare a safe hardware validation. |
+## Credits
 
-For AI-assisted contributions, read [`AGENTS.md`](AGENTS.md); for safe issue data
-and human contributions, see [`CONTRIBUTING.md`](CONTRIBUTING.md). Common setup
-and dual-boot questions are covered in the [`FAQ`](docs/FAQ.md).
+Thanks to everyone whose research, code, and testing made this project possible:
 
-### Hands-on lab — no finger or secret data required
+| Contributor / project | Contribution |
+|---|---|
+| **Oleg ([@mrcook1e-ai](https://github.com/mrcook1e-ai))** | Original GM168 research, USB protocol structures, TLS-PSK transport, async SSM state machines, and image pipeline. [`goodix-gm168`](https://github.com/mrcook1e-ai/goodix-gm168) |
+| **Daniil Yakoshinov ([@yakoshiq](https://github.com/yakoshiq))** | Hardware validation, security/lifecycle hardening, clean overlay restructuring, and packaging. [`libfprint-goodix-gm168`](https://github.com/yakoshiq/libfprint-goodix-gm168) |
+| **wseng ([@wseng](https://github.com/wseng))** | Early driver implementation and protocol contributions. |
+| **Space-Dev0 ([@Space-Dev0](https://github.com/Space-Dev0))** | Goodix `27c6:581a` driver, reciprocal matching logic, tiled capture-coverage gate, and deferred deactivation. [`goodix-fingerprint-drivers`](https://github.com/Space-Dev0/goodix-fingerprint-drivers) |
+| **Alexander Meiler ([@TheWeirdDev](https://github.com/TheWeirdDev))**, **Matthieu Charette ([@mpi3d](https://github.com/mpi3d))**, **Alireza S.N. ([@alirezasn80](https://github.com/alirezasn80))** | Foundational Goodix `55b4` TLS transport and protocol reverse engineering. [`libfprint (55b4-exp)`](https://github.com/TheWeirdDev/libfprint) |
+| **Matthieu Charette ([@mpi3d](https://github.com/mpi3d))**, **Natasha England-Elbro ([@ashenglandelbro](https://gitlab.freedesktop.org/ashenglandelbro))**, **Timur Mangliev ([@tigrmango](https://github.com/tigrmango))** | Original SIGFM algorithm for small capacitive sensors. [libfprint MR !530](https://gitlab.freedesktop.org/libfprint/libfprint/-/merge_requests/530) |
+| **libfprint upstream** | Core fingerprint daemon and library infrastructure. [`libfprint`](https://gitlab.freedesktop.org/libfprint/libfprint) |
 
-After the isolated build above, run the synthetic recovery and matching suites:
-
-```bash
-meson test -C build \
-  goodix-gm168-psk-recovery fpi-sigfm sigfm-tests goodix-gm168-frame-layout \
-  --print-errorlogs
-```
-
-This exercises pinned cryptographic vectors, malformed DPAPI/TLV inputs, SIGFM
-serialization/matching/reciprocal/quality behavior, packed-frame layout, and
-negative controls without accessing a sensor. See
-[`docs/TESTING.md`](docs/TESTING.md) for Valgrind and the offline-vs-live proof
-boundary.
-
-## Acknowledgements and provenance
-
-This project builds upon the foundational research, drivers, and algorithms developed by the Linux biometrics community:
-
-| Contributor / Project | Role & Key Contributions | Links & Repositories |
-|---|---|---|
-| **Oleg ([@mrcook1e-ai](https://github.com/mrcook1e-ai))** | Original GM168 research, USB protocol structures, TLS-PSK transport, async SSM state machines, image pipeline | [`mrcook1e-ai/goodix-gm168`](https://github.com/mrcook1e-ai/goodix-gm168) |
-| **Daniil Yakoshinov ([@yakoshiq](https://github.com/yakoshiq))** | Hardware validation, security/lifecycle hardening, clean overlay restructuring, and packaging | [`yakoshiq/libfprint-goodix-gm168`](https://github.com/yakoshiq/libfprint-goodix-gm168) |
-| **wseng ([@wseng](https://github.com/wseng))** | Early driver implementation and protocol contribution | [`github.com/wseng`](https://github.com/wseng) |
-| **Space-Dev0 ([@Space-Dev0](https://github.com/Space-Dev0))** | Goodix 27c6:581a driver, reciprocal matching logic, tiled capture-coverage gate, deferred deactivation | [`goodix-fingerprint-drivers`](https://github.com/Space-Dev0/goodix-fingerprint-drivers) |
-| **Alexander Meiler ([@TheWeirdDev](https://github.com/TheWeirdDev))**, **Matthieu Charette ([@mpi3d](https://github.com/mpi3d))**, **Alireza S.N. ([@alirezasn80](https://github.com/alirezasn80))** | Foundational Goodix 55b4 TLS transport and protocol reverse-engineering | [`TheWeirdDev/libfprint (55b4-exp)`](https://github.com/TheWeirdDev/libfprint) |
-| **Matthieu Charette ([@mpi3d](https://github.com/mpi3d))**, **Natasha England-Elbro ([@ashenglandelbro](https://gitlab.freedesktop.org/ashenglandelbro))**, **Timur Mangliev ([@tigrmango](https://github.com/tigrmango))** | Original SIGFM (Scale-Invariant Geometric Feature Matching) algorithm for small capacitive sensors | [libfprint MR !530](https://gitlab.freedesktop.org/libfprint/libfprint/-/merge_requests/530) |
-| **libfprint upstream** | Core fingerprint daemon and library infrastructure | [`gitlab.freedesktop.org/libfprint/libfprint`](https://gitlab.freedesktop.org/libfprint/libfprint) |
+Substantial portions of the research, code, tests, and documentation were produced
+with AI coding assistance under human review and direction. No independent
+security audit has been performed. See [NOTICE](NOTICE) for complete attribution.
 
 ## License
 
-Licensed under **LGPL-2.1-or-later**. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for complete legal terms, copyright notices, and clean-room provenance details.
+[LGPL-2.1-or-later](LICENSE), without warranty. See also [NOTICE](NOTICE) and
+[SECURITY.md](SECURITY.md).

@@ -42,11 +42,13 @@ The high-level activation sequence is:
 5. sensor register setup (`0x90`), template slot cleanup (`0xC4`), session init
    (`0x60`), power (`0xD6`), and IRQ/FDT setup (`0xAE`, `0x32`);
 6. five no-finger dark background frames (`0x20` trigger loop) with mean
-   sanity check (`GM168_BG_MIN_MEAN`, default `2200`);
+   sanity check (`GM168_BG_MIN_MEAN`, default `2500`, provisional retune from
+   `2200` on one owner device; `$GM168_BG_MIN_MEAN` override retained);
 7. FDT re-arm (`0x34` x2, delay, `0xAE`, `0x32`);
 8. finger-detection polling on Bulk IN (`0x83`);
-9. settle delay (`150 ms` default), capture trigger (`0x20`), and `B2` receive;
-10. dual-capture selection, sensor re-arm, and finger-lift wait (`wait_lift`).
+9. settle delay (`220 ms` default, retuned from `150 ms` provisionally;
+   `$GM168_CAPTURE_SETTLE_MS` clamp `100..2000`), capture trigger (`0x20`), and `B2` receive;
+10. dual-capture selection, early usable-frame submission (`gm168_submit_capture()`) overlapped with sensor re-arm and finger-lift wait (`wait_lift`, `150 ms` default), or zero-quality frame discard before resuming polling.
 
 Every transport phase is asynchronous through libfprint `FpiSsm` state
 machines. Deadlines, retry caps, cancellation, removal handling, and recovery
@@ -116,11 +118,12 @@ The driver selects `FPI_PRINT_SIGFM` (OpenCV SIFT keypoints + Lowe ratio test +
 RANSAC 2D partial-affine verification) instead of NBIS:
 
 - enrollment stages: `20` (`GM168_NR_ENROLL_STAGES`)
-- match threshold (RANSAC inliers): `8` (`GM168_SIGFM_THRESHOLD`)
+- match threshold (RANSAC inliers): `7` (`GM168_SIGFM_THRESHOLD`, provisional;
+  `$GM168_SIGFM_THRESHOLD` override `4..1000` for A/B and rollback)
 - enrollment anti-duplicate threshold: `15` (`GM168_SIGFM_DUP_THRESHOLD`, max
   6 consecutive duplicate rejections before safety fallback)
 - verify/identify auto-retry count: `2` (`GM168_SIGFM_VERIFY_RETRIES`)
-- quality gate: central 48x48 std-dev proxy + dual-capture selection per touch
+- quality gate: post-stretch central 48x48 std-dev proxy for best-of-N/accept, plus a pre-stretch raw-variance rank only for ordering two usable dual-capture candidates (zero-quality pairs are discarded without consuming a retry or verify attempt)
 
 These parameters were tuned on limited test hardware (`27c6:589a`, firmware
 `GFUSB_GM168SEC_APP_10036`) and remain subject to broader validation across

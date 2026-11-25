@@ -16,10 +16,12 @@
 #include "goodix_tls.h"
 #include "gm168_psk_recovery.h"
 #include "gm168_frame_layout.h"
+#include "gm168_lifecycle.h"
 #include "gm168_timeouts.h"
 #include "gm168_trace.h"
 #include "gm168_usb_errors.h"
 #include "gm168_log.h"
+#include "gm168_capture_policy.h"
 
 #include <math.h>
 #include <openssl/crypto.h>
@@ -50,9 +52,10 @@
  * single-frame BG used previously produced std ~60 in the final image; with
  * N=5 averaging std rises closer to the Windows-preprocessor reference (91). */
 #define GM168_BG_FRAMES           5
-#define GM168_BG_MIN_MEAN_DEFAULT 2200
+/* GM168_BG_MIN_MEAN_DEFAULT lives in gm168_capture_policy.h so the standalone
+ * contract test can pin the background acceptance boundary. Retry, settle,
+ * and timeout constants live in gm168_timeouts.h (see G13). */
 #define GM168_BG_RETRIES_DEFAULT  3
-/* Retry / timeout constants moved to gm168_timeouts.h (see G13). */
 
 // --- INITIALIZATION STATE MACHINE ---
 enum init_states {
@@ -139,6 +142,11 @@ struct _FpDeviceGoodixGm168 {
     int      ack_retry;      /* re-listen counter for ack_cb and bg_rx_cb;
                               * reset every time a state advance happens     */
     gboolean deactivating;
+    /* Cancellation after an early match may arrive during post-capture REARM.
+     * In that case keep generation/USB alive and defer DEINIT until the SSM
+     * finishes, so the next fast-path activation still has FDT armed. */
+    gboolean rearm_active;
+    gboolean deinit_pending;
     gboolean active_state;
     gboolean active_capture; /* TRUE while capture SSM runs -- suppress poll restart */
 
@@ -178,17 +186,21 @@ struct _FpDeviceGoodixGm168 {
      * Windows continuously captures while finger is on the sensor, runs each
      * frame through the preprocessor which returns (quality, coverage), and
      * keeps only frames with quality>=65 && coverage>=25. Best-of-N is the
-     * actual submitted template. We replicate that here with a simpler
-     * quality proxy (std-dev of central region, saturation gate).
+     * actual submitted template. We replicate that here with a post-stretch
+     * quality/saturation gate and a separate pre-stretch raw variance rank
+     * for final dual selection; the raw rank never feeds the quality threshold.
      *
      * State across attempts within ONE touch event:
      *   best_img        — currently-best FpImage (we own a ref)
-     *   best_quality    — its score (higher = better)
+     *   best_quality    — its post-stretch gate score
+     *   best_rank       — its pre-stretch selection rank (zero if unusable)
      *   capture_attempt — how many captures we've tried this touch
      *   capture_start_us — monotonic timestamp of first attempt
      * All four are reset at touch-detect (poll_cb) and after submit.       */
     FpImage *best_img;
     gfloat   best_quality;
+    gfloat   best_rank;   /* pre-stretch raw rank (selection key only, never
+                           * compared against GM168_QUALITY_THRESH)          */
     int      capture_attempt;
     gint64   capture_start_us;
 
@@ -199,7 +211,12 @@ struct _FpDeviceGoodixGm168 {
      * dual_pending_img holds frame #1 while we capture frame #2.       */
     FpImage *dual_pending_img;
     gfloat   dual_pending_quality;
+    gfloat   dual_pending_rank;     /* pre-stretch raw rank of frame #1      */
     gboolean dual_in_second;        /* TRUE while waiting for frame #2  */
+
+    /* TRUE from the early image_captured() submission until REARM/RECOVER
+     * reports finger-off. Zero-quality false touches never set this flag. */
+    gboolean capture_submitted;
 
     /* G7: opt-in per-state timing trace. Enabled by $GM168_TRACE=1.      */
     GM168Trace trace;
@@ -255,14 +272,11 @@ struct SsmData {
 #define GM168_MAX_CAPTURE_ATTEMPTS   6
 #define GM168_CAPTURE_BUDGET_MS      600
 #define GM168_REARM_RETRY_DELAY_MS      200
-#define GM168_CAPTURE_SETTLE_MS         150
-#define GM168_CAPTURE_SETTLE_MIN_MS     100
-#define GM168_CAPTURE_SETTLE_MAX_MS     2000
 #define GM168_WAIT_LIFT_POLL_DEFAULT_MS 150
 #define GM168_WAIT_LIFT_POLL_MIN_MS     50
 #define GM168_WAIT_LIFT_POLL_MAX_MS     1000
 /* SIGFM tunables: score = RANSAC inliers; 20 stages for coverage on small sensor. */
-#define GM168_SIGFM_THRESHOLD        8
+#define GM168_SIGFM_THRESHOLD        7
 #define GM168_SIGFM_DUP_THRESHOLD    15
 #define GM168_SIGFM_VERIFY_RETRIES   2
 #define GM168_SIGFM_MIN_KEYPOINTS    30
@@ -3166,10 +3180,11 @@ init_bg_wait_lift_cb (FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_dat
                              self->io_cancellable, init_bg_wait_lift_cb, NULL);
 }
 
-static void start_rearm_ssm(FpDeviceGoodixGm168 *self, GError *enroll_err, FpImage *img);
+static void start_rearm_ssm(FpDeviceGoodixGm168 *self, GError *enroll_err);
 static void start_rearm_retry_ssm(FpDeviceGoodixGm168 *self);
+static void gm168_dev_deactivate_now(FpDeviceGoodixGm168 *self);
 static void start_recover_ssm(FpDeviceGoodixGm168 *self,
-                              GError *capture_error, FpImage *img); /* G4 */
+                              GError *capture_error); /* G4 */
 static gfloat gm168_quality_metric (const guint8 *img);
 
 static void
@@ -3331,36 +3346,77 @@ gm168_clear_capture_candidates (FpDeviceGoodixGm168 *self)
     g_clear_object (&self->best_img);
     g_clear_object (&self->dual_pending_img);
     self->best_quality = 0.0f;
+    self->best_rank = 0.0f;
     self->dual_pending_quality = 0.0f;
+    self->dual_pending_rank = 0.0f;
     self->dual_in_second = FALSE;
     self->capture_attempt = 0;
     self->capture_start_us = 0;
 }
 
 static FpImage *
-gm168_take_best_capture (FpDeviceGoodixGm168 *self, gfloat *quality_out)
+gm168_take_best_capture (FpDeviceGoodixGm168 *self,
+                         gfloat *quality_out,
+                         int *frame_index_out)
 {
     FpImage *picked = NULL;
     gfloat quality = 0.0f;
+    int frame_index = 0;
 
-    if (self->best_img &&
-        (!self->dual_pending_img ||
-         self->best_quality > self->dual_pending_quality)) {
+    if (self->best_img && self->dual_pending_img) {
+        /* Post-quality determines usability; the raw rank only orders two
+         * usable candidates. The unselected image is released here. */
+        if (gm168_dual_pick (self->dual_pending_quality,
+                             self->best_quality,
+                             self->dual_pending_rank,
+                             self->best_rank) == 2) {
+            picked = g_steal_pointer (&self->best_img);
+            quality = self->best_quality;
+            frame_index = 2;
+            g_clear_object (&self->dual_pending_img);
+        } else {
+            picked = g_steal_pointer (&self->dual_pending_img);
+            quality = self->dual_pending_quality;
+            frame_index = 1;
+            g_clear_object (&self->best_img);
+        }
+    } else if (self->best_img) {
         picked = g_steal_pointer (&self->best_img);
         quality = self->best_quality;
-        g_clear_object (&self->dual_pending_img);
+        frame_index = self->dual_in_second ? 2 : 1;
     } else if (self->dual_pending_img) {
         picked = g_steal_pointer (&self->dual_pending_img);
         quality = self->dual_pending_quality;
-        g_clear_object (&self->best_img);
+        frame_index = 1;
     }
 
     self->best_quality = 0.0f;
+    self->best_rank = 0.0f;
     self->dual_pending_quality = 0.0f;
+    self->dual_pending_rank = 0.0f;
     self->dual_in_second = FALSE;
+    self->capture_attempt = 0;
+    self->capture_start_us = 0;
     if (quality_out)
         *quality_out = quality;
+    if (frame_index_out)
+        *frame_index_out = frame_index;
     return picked;
+}
+
+/* Submit a usable frame before REARM so SIGFM extraction overlaps the
+ * sensor discharge/lift-wait. AWAIT_FINGER_OFF deliberately does not report
+ * finger-off from dev_change_state(); rearm_completed()/recover_completed()
+ * do that only after the sensor is armed for the next touch. */
+static void
+gm168_submit_capture (FpDeviceGoodixGm168 *self, FpImage *img)
+{
+    g_assert (img != NULL);
+    g_assert (!self->capture_submitted);
+
+    self->capture_submitted = TRUE;
+    fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (self), TRUE);
+    fpi_image_device_image_captured (FP_IMAGE_DEVICE (self), img);
 }
 
 static void
@@ -3401,18 +3457,26 @@ capture_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
          * whole stage. The unselected image is released by the helper. */
         int submit_n = self->capture_attempt;
         gfloat fallback_q = 0.0f;
-        FpImage *fallback = gm168_take_best_capture (self, &fallback_q);
+        FpImage *fallback = gm168_take_best_capture (self, &fallback_q, NULL);
         if (fallback) {
-            self->capture_attempt = 0;
-            fp_warn ("quality-gate: capture errored mid-retry — submit best q=%.2f after %d attempts (%s)",
-                     fallback_q, submit_n, error->message);
-            g_error_free (error);
-            start_rearm_ssm (self, NULL, fallback);
+            if (fallback_q > 0.0f) {
+                fp_warn ("quality-gate: capture errored mid-retry — submit best q=%.2f after %d attempts (%s)",
+                         fallback_q, submit_n, error->message);
+                g_error_free (error);
+                self->log.last_quality = fallback_q;
+                gm168_submit_capture (self, fallback);
+            } else {
+                fp_info ("quality-gate: discard zero-quality fallback after capture error (%s)",
+                         error->message);
+                g_error_free (error);
+                g_object_unref (fallback);
+            }
+            start_rearm_ssm (self, NULL);
             return;
         }
         /* Keep the action single-terminal: REARM performs hardware cleanup,
          * then reports this error from rearm_completed. */
-        start_rearm_ssm (self, error, NULL);
+        start_rearm_ssm (self, error);
         return;
     }
 
@@ -3425,8 +3489,9 @@ capture_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
         guint16 *raw16 = g_new (guint16, GM168_FRAME_PIXELS);
         if (gm168_decode_frame (self->img_buf, self->img_len, raw16) != 0) {
             g_free (raw16);
+            gm168_clear_capture_candidates (self);
             GError *err = fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID);
-            start_rearm_ssm (self, err, NULL);
+            start_rearm_ssm (self, err);
             return;
         }
 
@@ -3440,10 +3505,19 @@ capture_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
 
         FpImage *base_img = fp_image_new (GM168_FRAME_W, GM168_FRAME_H);
 
+        /* Pre-stretch raw rank: ordering key for the final dual pick only.
+         * Uncalibrated 12-bit variance — never fed to GM168_QUALITY_THRESH. */
+        gfloat r = gm168_raw_rank (raw16, self->background,
+                                   GM168_FRAME_W, GM168_FRAME_H);
+
         gm168_envelope_stretch (raw16, self->background,
                                 self->cal1, self->cal2, base_img->data,
                                 dump_dir ? &dump_ctx : NULL);
         gfloat q = gm168_quality_metric (base_img->data);
+        /* A post-stretch rejected frame is unusable even when its raw
+         * variance is high. Keep it for the all-zero fallback, but never let
+         * its rank displace a usable candidate or win the dual selection. */
+        gfloat rank = gm168_effective_rank (q, r);
 
         /* NBIS cannot form a useful direction map from the native 80x64
          * frame. Use an internal twofold bilinear enlargement; libfprint
@@ -3483,18 +3557,22 @@ capture_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
         gint64   elapsed = (now_us - self->capture_start_us) / 1000; /* ms */
         self->capture_attempt++;
 
-        fp_dbg ("quality-gate: attempt=%d quality=%.2f elapsed=%lldms (thresh=%.1f)",
-                self->capture_attempt, q, (long long)elapsed,
+        fp_dbg ("quality-gate: attempt=%d quality=%.2f rank=%.1f raw_rank=%.1f elapsed=%lldms (thresh=%.1f)",
+                self->capture_attempt, q, rank, r, (long long)elapsed,
                 GM168_QUALITY_THRESH);
 
-        /* Always keep at least one frame in best_img so the "submit on
-         * timeout" path has something to send even when every capture
-         * scored zero (e.g. all-saturated). Subsequent frames only
-         * replace best if they strictly beat its score. */
+        /* Always keep at least one frame in best_img so the error fallback
+         * and dual-capture selection can inspect every candidate, including
+         * zero-quality ones. Best-of-N keeps the original post-stretch quality
+         * ordering so a lower-ranked frame that crosses QUALITY_THRESH cannot
+         * be hidden behind a below-threshold high-variance incumbent. The raw
+         * rank travels with the selected frame and is used only for the final
+         * dual pick. A final all-zero pair is discarded. */
         if (!self->best_img || q > self->best_quality) {
             if (self->best_img) g_object_unref (self->best_img);
             self->best_img     = fp_img;       /* ownership transfer */
             self->best_quality = q;
+            self->best_rank    = rank;
             fp_img = NULL;
         } else {
             g_object_unref (fp_img);
@@ -3502,12 +3580,16 @@ capture_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
         }
 
         /* The MCU does not reliably provide another frame after a quick
-         * re-arm. The pre-capture settle delay handles early contact; if
-         * quality is still zero, submit once and let MINDTCT request retry. */
-        gboolean accept = (self->best_quality == 0.0f                    ||
-                           self->best_quality >= GM168_QUALITY_THRESH    ||
-                           self->capture_attempt >= GM168_MAX_CAPTURE_ATTEMPTS ||
-                           elapsed >= GM168_CAPTURE_BUDGET_MS);
+         * re-arm. Accept a zero-quality first frame only into dual capture:
+         * the second frame may still be usable; an all-zero pair is dropped.
+         * During the second capture, never spend a rearm-retry once frame #1
+         * is usable — go straight to the dual pick instead. */
+        gboolean accept =
+            (self->best_quality == 0.0f                    ||
+             self->best_quality >= GM168_QUALITY_THRESH    ||
+             self->capture_attempt >= GM168_MAX_CAPTURE_ATTEMPTS ||
+             elapsed >= GM168_CAPTURE_BUDGET_MS            ||
+             (self->dual_in_second && self->dual_pending_quality > 0.0f));
 
         if (!accept && self->best_img) {
             /* Retry: short rearm, then another capture cycle. */
@@ -3526,8 +3608,10 @@ capture_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
             int attempts_so_far = self->capture_attempt;
             self->dual_pending_img     = self->best_img;
             self->dual_pending_quality = self->best_quality;
+            self->dual_pending_rank    = self->best_rank;
             self->best_img             = NULL;
             self->best_quality         = 0.0f;
+            self->best_rank            = 0.0f;
             self->capture_attempt      = 0;
             self->dual_in_second       = TRUE;
             GM168_LOG_CAP (&self->log,
@@ -3538,50 +3622,46 @@ capture_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
             return;
         }
 
-        /* Second capture done — pick the better of the two. */
-        self->dual_in_second = FALSE;
-        FpImage *to_submit;
-        gfloat   submit_q;
-        if (self->best_quality > self->dual_pending_quality) {
-            to_submit = self->best_img;
-            submit_q  = self->best_quality;
-            if (self->dual_pending_img)
-                g_object_unref (self->dual_pending_img);
-            GM168_LOG_CAP (&self->log,
-                           "dual: pick #2  q=%.2f  (#1=%.2f dropped)",
-                           submit_q, self->dual_pending_quality);
-        } else {
-            to_submit = self->dual_pending_img;
-            submit_q  = self->dual_pending_quality;
-            if (self->best_img)
-                g_object_unref (self->best_img);
-            GM168_LOG_CAP (&self->log,
-                           "dual: pick #1  q=%.2f  (#2=%.2f dropped)",
-                           submit_q, self->best_quality);
-        }
-        self->best_img             = NULL;
-        self->best_quality         = 0.0f;
-        self->dual_pending_img     = NULL;
-        self->dual_pending_quality = 0.0f;
-        self->capture_attempt      = 0;
+        /* Second capture done — use the same ownership and selection path as
+         * the error fallback. Tie / within-margin goes to settled frame #2;
+         * zero-quality drop below still uses the selected post-stretch q. */
+        gfloat first_q = self->dual_pending_quality;
+        gfloat second_q = self->best_quality;
+        gfloat submit_q = 0.0f;
+        int picked_frame = 0;
+        FpImage *to_submit = gm168_take_best_capture (self, &submit_q,
+                                                       &picked_frame);
+        GM168_LOG_CAP (&self->log,
+                       "dual: pick #%d  q=%.2f  (#1 q=%.2f, #2 q=%.2f)",
+                       picked_frame, submit_q, first_q, second_q);
 
         if (to_submit) {
-            fp_warn ("quality-gate: SUBMIT (best of dual) quality=%.2f",
-                     submit_q);
-            self->log.last_quality = submit_q;
-            GM168_LOG_CAP (&self->log, "q=%.2f  → SUBMIT", submit_q);
-            start_rearm_ssm (self, NULL, to_submit);
+            if (submit_q > 0.0f) {
+                fp_warn ("quality-gate: SUBMIT (best of dual) quality=%.2f",
+                         submit_q);
+                self->log.last_quality = submit_q;
+                GM168_LOG_CAP (&self->log, "q=%.2f  → SUBMIT", submit_q);
+                gm168_submit_capture (self, to_submit);
+            } else {
+                /* A false FDT can capture only flat/saturated background.
+                 * Never turn that into a libfprint retry or a verify attempt. */
+                fp_info ("quality-gate: DROP zero-quality dual capture (false FDT/no usable ridge data)");
+                GM168_LOG_CAP (&self->log, "q=0.00  → DROP (no usable frame)");
+                g_object_unref (to_submit);
+            }
+            start_rearm_ssm (self, NULL);
         } else {
             /* Should not happen — first attempt always saves the frame as
              * best (initial best_quality is 0 and q is at least 0). Keep
              * the guard just in case. */
             GError *err = fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID);
-            start_rearm_ssm (self, err, NULL);
+            start_rearm_ssm (self, err);
         }
 
     } else {
+        gm168_clear_capture_candidates (self);
         GError *err = fpi_device_error_new (FP_DEVICE_ERROR_DATA_INVALID);
-        start_rearm_ssm(self, err, NULL);
+        start_rearm_ssm(self, err);
     }
 }
 
@@ -3610,7 +3690,9 @@ capture_after_settle_cb (FpDevice *dev, gpointer user_data)
         !gm168_action_active (self) || self->active_capture)
         return;
 
-    fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (dev), TRUE);
+    /* Delay finger-present until a usable frame is actually submitted.
+     * Otherwise a false FDT forces the core through CAPTURE and consumes a
+     * user-visible retry even when every captured frame has quality zero. */
     self->capture_start_us = g_get_monotonic_time ();
     start_capture_ssm (self);
 }
@@ -3674,6 +3756,7 @@ poll_cb (FpiUsbTransfer *transfer, FpDevice *dev, gpointer user_data, GError *er
         if (goodix_gm168_is_touch_event (packet, packet_len)) {
             gm168_log_touch_divider (&self->log);
             gm168_clear_capture_candidates (self);
+            self->capture_submitted = FALSE;
             fpi_device_add_timeout (
                 dev, gm168_capture_settle_ms (), capture_after_settle_cb,
                 GUINT_TO_POINTER (self->generation), NULL);
@@ -3771,7 +3854,6 @@ enum rearm_states {
 struct RearmData {
     struct SsmData base;
     GError  *err;
-    FpImage *img;
     /* TRUE = quality-gate wants another capture: skip finger-off report,
      * skip image_captured, just re-arm and start_capture_ssm again. */
     gboolean retry;
@@ -3798,7 +3880,6 @@ rearm_data_free (gpointer data)
     struct RearmData *rd = data;
 
     g_clear_error (&rd->err);
-    g_clear_object (&rd->img);
     g_free (rd);
 }
 
@@ -4007,6 +4088,17 @@ rearm_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
     }
     gm168_trace_ssm_done (&self->trace, "REARM");
     self->ssm_deadline_us = 0;
+    self->rearm_active = FALSE;
+
+    /* A successful early match can make the client cancel while REARM is
+     * still running. Now that FDT restoration reached a terminal state,
+     * execute the deferred teardown instead of leaking a dead fast path. */
+    if (self->deinit_pending) {
+        fp_dbg ("REARM terminal — running deferred DEINIT");
+        g_clear_error (&error);
+        gm168_dev_deactivate_now (self);
+        return;
+    }
 
     if (self->device_dead && !error)
         error = fpi_device_error_new (FP_DEVICE_ERROR_REMOVED);
@@ -4028,20 +4120,18 @@ rearm_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
             return;
         }
 
-        /* Preserve a completed image across level-2 recovery. Reporting
-         * finger-off here without image_captured()/retry_scan() would leave
-         * FpImageDevice stranded in its CAPTURE state. */
+        /* Keep capture_submitted across level-2 recovery. Successful RECOVER
+         * either completes finger-off for the already-submitted image or
+         * resumes polling after a discarded zero-quality false touch. */
         fp_warn ("Rearm failed: %s — escalating to RECOVER", error->message);
         GM168_LOG_ERR (&self->log, "REARM failed: %s — escalating to RECOVER", error->message);
         g_error_free (error);
         GError *capture_error = g_steal_pointer (&rd->err);
-        FpImage *img = g_steal_pointer (&rd->img);
         if (!gm168_action_active (self)) {
             g_clear_error (&capture_error);
-            g_clear_object (&img);
             return;
         }
-        start_recover_ssm (self, capture_error, img);
+        start_recover_ssm (self, capture_error);
         return;
     }
 
@@ -4062,7 +4152,7 @@ rearm_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
                   ? (g_get_monotonic_time () - self->log.rearm_start_us) / 1000.0
                   : 0.0;
         GM168_LOG_REARM (&self->log, "✓ armed  (%.0f ms)", ms);
-        if (rd->img) {
+        if (self->capture_submitted) {
             self->log_stage_count++;
             GM168_LOG_STAGE (&self->log, "#%d  q=%.2f  ✓",
                              self->log_stage_count, self->log.last_quality);
@@ -4072,15 +4162,14 @@ rearm_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
         }
     }
 
-    fpi_image_device_report_finger_status(img_dev, FALSE);
+    if (self->capture_submitted) {
+        self->capture_submitted = FALSE;
+        fpi_image_device_report_finger_status (img_dev, FALSE);
+    }
 
-    if (rd->err) {
+    if (rd->err)
         fpi_image_device_session_error (
             img_dev, g_steal_pointer (&rd->err));
-    } else if (rd->img) {
-        fpi_image_device_image_captured (
-            img_dev, g_steal_pointer (&rd->img));
-    }
 
     // Do not auto-resume polling here. wait for next change_state unless we're already supposed to be capturing
     if (!self->deactivating && self->active_state) {
@@ -4089,11 +4178,10 @@ rearm_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
 }
 
 static void
-start_rearm_ssm(FpDeviceGoodixGm168 *self, GError *enroll_err, FpImage *img)
+start_rearm_ssm(FpDeviceGoodixGm168 *self, GError *enroll_err)
 {
     if (!gm168_action_active (self)) {
         g_clear_error (&enroll_err);
-        g_clear_object (&img);
         return;
     }
     self->log.rearm_start_us = g_get_monotonic_time ();
@@ -4103,9 +4191,9 @@ start_rearm_ssm(FpDeviceGoodixGm168 *self, GError *enroll_err, FpImage *img)
     struct RearmData *rd = g_malloc0(sizeof(struct RearmData));
     rd->base.generation = self->generation;
     rd->err = enroll_err;
-    rd->img = img;
     rd->retry = FALSE;
     fpi_ssm_set_data(ssm, rd, rearm_data_free);
+    self->rearm_active = TRUE;
     fpi_ssm_start (ssm, rearm_completed);
 }
 
@@ -4126,6 +4214,7 @@ start_rearm_retry_ssm(FpDeviceGoodixGm168 *self)
     rd->base.generation = self->generation;
     rd->retry = TRUE;
     fpi_ssm_set_data(ssm, rd, rearm_data_free);
+    self->rearm_active = TRUE;
     fpi_ssm_start (ssm, rearm_completed);
 }
 
@@ -4165,7 +4254,6 @@ enum recover_states {
 struct RecoverData {
     struct SsmData base;
     GError *capture_error;
-    FpImage *img;
 };
 
 _Static_assert (offsetof (struct RecoverData, base) == 0,
@@ -4177,7 +4265,6 @@ recover_data_free (gpointer data)
     struct RecoverData *rd = data;
 
     g_clear_error (&rd->capture_error);
-    g_clear_object (&rd->img);
     g_free (rd);
 }
 
@@ -4299,24 +4386,24 @@ recover_completed (FpiSsm *ssm, FpDevice *dev, GError *error)
     fp_dbg ("RECOVER OK — sensor back to touch-wait");
     GM168_LOG_RECOV (&self->log, "✓ sensor recovered");
 
-    if (rd->img) {
+    if (self->capture_submitted) {
+        self->capture_submitted = FALSE;
         fpi_image_device_report_finger_status (img_dev, FALSE);
-        fpi_image_device_image_captured (img_dev, g_steal_pointer (&rd->img));
         return;
     }
 
-    /* A failed quality-gate REARM has no completed image. Terminate this
-     * capture through the core retry path rather than restarting POLL while
-     * FpImageDevice is still in CAPTURE. */
-    fpi_image_device_retry_scan (img_dev, FP_DEVICE_RETRY_GENERAL);
+    /* No image entered the core (for example, a discarded zero-quality false
+     * touch). We are still in AWAIT_FINGER_ON, so resume polling without a
+     * user-visible retry. Capture errors were surfaced above. */
+    if (!self->deactivating && self->active_state)
+        start_polling (self);
 }
 
 static void
-start_recover_ssm (FpDeviceGoodixGm168 *self, GError *capture_error, FpImage *img)
+start_recover_ssm (FpDeviceGoodixGm168 *self, GError *capture_error)
 {
     if (!gm168_action_active (self)) {
         g_clear_error (&capture_error);
-        g_clear_object (&img);
         return;
     }
     fp_warn ("starting RECOVER SSM");
@@ -4326,7 +4413,6 @@ start_recover_ssm (FpDeviceGoodixGm168 *self, GError *capture_error, FpImage *im
     struct RecoverData *rd = g_new0 (struct RecoverData, 1);
     rd->base.generation = self->generation;
     rd->capture_error = capture_error;
-    rd->img = img;
     fpi_ssm_set_data (ssm, rd, recover_data_free);
     fpi_ssm_start (ssm, recover_completed);
 }
@@ -4339,6 +4425,15 @@ action_cancelled_cb (GCancellable *cancellable, gpointer user_data)
     FpDeviceGoodixGm168 *self = user_data;
 
     (void) cancellable;
+
+    /* Keep the post-capture FDT restoration alive. dev_deactivate() will
+     * defer DEINIT on the same predicate and cancel this cancellable as soon
+     * as REARM completes. All other cancellation paths stay immediate. */
+    if (gm168_should_drain_rearm (self->rearm_active, self->device_dead)) {
+        fp_dbg ("action cancelled — draining REARM before DEINIT");
+        return;
+    }
+
     if (self->io_cancellable)
         g_cancellable_cancel (self->io_cancellable);
 }
@@ -4362,6 +4457,8 @@ static void dev_activate (FpImageDevice *dev)
     self->activation_generation = self->generation;
     self->activation_pending = TRUE;
     self->deactivating  = FALSE;
+    self->rearm_active = FALSE;
+    self->deinit_pending = FALSE;
     if (self->device_dead && self->tls.ssl)
         goodix_gm168_tls_deinit (&self->tls);
     self->device_dead   = FALSE; /* G3 */
@@ -4372,6 +4469,7 @@ static void dev_activate (FpImageDevice *dev)
 
     /* Quality-gate state: drop any leftover best from a prior session. */
     gm168_clear_capture_candidates (self);
+    self->capture_submitted = FALSE;
 
     /* G8: fresh cancellable per activate. g_clear_object first guards
      * against re-activate without dev_deactivate (e.g. fprintd restart). */
@@ -4491,9 +4589,11 @@ static void dev_activate (FpImageDevice *dev)
     fpi_ssm_start (ssm, init_completed);
 }
 
-static void dev_deactivate (FpImageDevice *dev)
+static void
+gm168_dev_deactivate_now (FpDeviceGoodixGm168 *self)
 {
-    FpDeviceGoodixGm168 *self = FPI_DEVICE_GOODIX_GM168 (dev);
+    self->deinit_pending = FALSE;
+    self->rearm_active = FALSE;
     self->generation++;
     self->deactivating = TRUE;
     /* No callback can still legitimately consume this generation's recovery
@@ -4503,6 +4603,7 @@ static void dev_deactivate (FpImageDevice *dev)
     /* Free any quality-gate state that survived the session — prevents
      * us from submitting a stale image on the next activate. */
     gm168_clear_capture_candidates (self);
+    self->capture_submitted = FALSE;
     g_clear_error (&self->tls_error);
     self->active_capture = FALSE;
     self->poll_transfer = NULL;
@@ -4533,9 +4634,26 @@ static void dev_deactivate (FpImageDevice *dev)
         g_byte_array_set_size (self->stitch_buf, 0);
 
     gm168_ssm_deadline_set (self, GM168_DEINIT_DEADLINE_MS);
-    FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (dev), deinit_run_state, DEINIT_NUM_STATES);
+    FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (self), deinit_run_state, DEINIT_NUM_STATES);
     gm168_ssm_set_generation (self, ssm);
     fpi_ssm_start (ssm, deinit_completed);
+}
+
+static void dev_deactivate (FpImageDevice *dev)
+{
+    FpDeviceGoodixGm168 *self = FPI_DEVICE_GOODIX_GM168 (dev);
+
+    if (gm168_should_drain_rearm (self->rearm_active, self->device_dead)) {
+        /* Do not bump generation, clear capture state, or cancel USB yet.
+         * rearm_completed() calls gm168_dev_deactivate_now() on every
+         * success/error/watchdog exit. */
+        self->deinit_pending = TRUE;
+        disconnect_action_cancellable (self);
+        fp_dbg ("deactivate requested during REARM — DEINIT deferred");
+        return;
+    }
+
+    gm168_dev_deactivate_now (self);
 }
 
 static void dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
@@ -4547,11 +4665,11 @@ static void dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
         fp_dbg ("change_state: AWAIT_FINGER_ON -> starting polling");
         start_polling (self);
     } else if (state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF) {
-        /* REARM SSM already reset the sensor (0x34×2 + 1500ms + 0x32). The
-         * second report_finger_status(FALSE) unblocks FPI_DEVICE_ACTION_CAPTURE. */
+        /* image_captured() is emitted before REARM so SIGFM can run in
+         * parallel. Only rearm_completed()/recover_completed() may report
+         * finger-off; doing it here would deactivate and cancel that SSM. */
         self->active_state = FALSE;
-        fp_dbg ("change_state: AWAIT_FINGER_OFF -> confirming finger released");
-        fpi_image_device_report_finger_status (dev, FALSE);
+        fp_dbg ("change_state: AWAIT_FINGER_OFF -> waiting for REARM completion");
     } else {
         self->active_state = FALSE;
     }
@@ -4581,6 +4699,15 @@ static void dev_open (FpImageDevice *dev)
     gint dup_thresh = gm168_sigfm_dup_threshold ();
     fpi_image_device_set_sigfm_dup_threshold (dev, dup_thresh);
     fp_dbg ("goodix-gm168: SIGFM enroll anti-dup threshold = %d", dup_thresh);
+
+    /* Instance-level override of the class-default match threshold
+     * (img_class->bz3_threshold set in class_init). Range 4..1000 keeps the
+     * value positive (fpi_image_device_set_bz3_threshold asserts > 0). */
+    gint match_thresh = gm168_env_int ("GM168_SIGFM_THRESHOLD",
+                                       GM168_SIGFM_THRESHOLD, 4, 1000);
+    fpi_image_device_set_bz3_threshold (dev, match_thresh);
+    fp_dbg ("goodix-gm168: SIGFM match threshold = %d (env override range 4..1000)",
+            match_thresh);
 
     gint verify_retries = gm168_env_int ("GM168_VERIFY_RETRIES",
                                          GM168_SIGFM_VERIFY_RETRIES, 0, 5);

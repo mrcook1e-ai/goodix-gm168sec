@@ -30,9 +30,10 @@ build prefix and run the unit tests first.
 
 ```bash
 sudo dnf install \
-  git meson ninja-build pkgconf-pkg-config gcc gcc-c++ \
-  glib2-devel libgusb-devel openssl3-devel \
-  opencv-devel doctest-devel cairo-devel
+  git meson ninja-build pkgconf-pkg-config gcc gcc-c++ patch diffutils \
+  glib2-devel libgusb-devel pixman-devel openssl3-devel \
+  opencv-devel doctest-devel cairo-devel systemd-devel \
+  gobject-introspection-devel
 ```
 
 Confirm pkg-config sees OpenSSL 3 and OpenCV 4:
@@ -166,10 +167,52 @@ export GM168_SIGFM_MIN_COVERAGE=0.55
 
 These values are provisional heuristics, not measured FAR/FRR guarantees. Keep the defaults for normal use unless comparing identical local captures, and do not publish frames/templates. Translation consensus remains compile-time A/B API functionality and is not enabled by these environment variables.
 
-## Fedora RPM spec (experimental / unsupported)
+## Optional diagnostic logging on SELinux systems
 
-An experimental RPM spec lives at `packaging/fedora/libfprint-goodix-gm168.spec`.
-Because it declares `Conflicts: libfprint` and replaces the system `libfprint`
-package, treat it as **unsupported / experimental** for packaging development
-only; prefer isolated `meson` builds unless you are testing in a disposable
-build environment.
+`GM168_LOG_DIR` is optional. On enforcing Fedora, a systemd `ReadWritePaths=` entry controls the filesystem sandbox but does **not** grant SELinux write permission. If `/var/log/goodix-gm168` is recreated with the default `var_log_t` type, `fprintd_t` may log `EACCES` and continue without file logging. For a persistent local diagnostic setup, assign a context writable by `fprintd_t` explicitly:
+
+```bash
+sudo semanage fcontext -a -t fprintd_var_lib_t '/var/log/goodix-gm168(/.*)?'
+sudo restorecon -Rv /var/log/goodix-gm168
+```
+
+Use `semanage fcontext -m` instead of `-a` if that local rule already exists. Keep diagnostic logs outside the public repository and never publish packet captures, fingerprint images, templates, or secrets. Omit `GM168_LOG_DIR` when file diagnostics are not needed.
+
+## Fedora 45 RPM (experimental)
+
+For normal Fedora 45 `x86_64` use, download the binary RPM from the project
+[Releases page](https://github.com/mrcook1e-ai/goodix-gm168sec/releases) and run:
+
+```bash
+sudo dnf install ./libfprint-goodix-gm168-0.2.0-*.fc45.x86_64.rpm
+```
+
+The package installs the private library under `/opt/libfprint-gm168`, the udev
+rule, and `/usr/lib/systemd/system/fprintd.service.d/60-goodix-gm168-rpm.conf`.
+The drop-in scopes `LD_LIBRARY_PATH` and the OpenSSL 3 configuration to
+`fprintd.service`; it does not replace system `libfprint` or add a global
+`ldconfig` path. An active `fprintd` is restarted after installation and after
+final package removal.
+
+Only `goodix_gm168` is enabled in this private libfprint build. Do not use the
+same `fprintd` instance for other fingerprint reader models while the package is
+installed. Existing files in `/etc/goodix-gm168` and enrolled templates are not
+removed with the RPM.
+
+### Build the RPM locally
+
+Install the build requirements above plus `rpm-build` and `bzip2`, then run from
+the repository root:
+
+```bash
+sudo dnf install rpm-build bzip2 redhat-rpm-config systemd-rpm-macros systemd-udev
+./packaging/fedora/build-rpm.sh ./dist
+cd dist
+sha256sum -c SHA256SUMS
+```
+
+The helper verifies the exact pinned upstream commit, creates pristine upstream
+and overlay source archives, runs the RPM `%check` suites, and writes the binary
+RPM, SRPM, and checksums to `dist/`. It does not install the package or access a
+fingerprint reader. The same helper runs in the GitHub Actions release workflow
+on `v*` tags; CI publishes a prerelease without performing live hardware tests.

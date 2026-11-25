@@ -34,7 +34,7 @@ After any Windows key rotation, an older Linux `psk.bin` will mismatch the senso
 
 ### Are `calib_windows.dat` and `cal_scale.bin` required?
 
-No. Both files are **optional**. By default, the driver captures `5` dark frames during `INIT`, validates that no finger is resting on the sensor (`GM168_BG_MIN_MEAN = 2200`), and runs dynamic background subtraction, 3×3 median filtering, 11-pixel envelope contrast stretching, and `2x` bilinear upscaling to `160x128`.
+No. Both files are **optional**. By default, the driver captures `5` dark frames during `INIT`, validates that no finger is resting on the sensor (`GM168_BG_MIN_MEAN = 2500`, a provisional retune from `2200` on one device; override with `$GM168_BG_MIN_MEAN`), and runs dynamic background subtraction, 3×3 median filtering, 11-pixel envelope contrast stretching, and `2x` bilinear upscaling to `160x128`.
 
 Do **not** fabricate synthetic calibration files or distribute per-device calibration blobs from another laptop. See [`IMAGE-PIPELINE.md`](IMAGE-PIPELINE.md).
 
@@ -53,7 +53,7 @@ There are two separate OpenSSL 3 requirements on Fedora 45:
 1. **Build time (`openssl >= 3.0, < 4.0`)**:
    - `meson.build` explicitly rejects OpenSSL `4.x` when `goodix_gm168` is enabled. On Fedora 45, the default `openssl-devel` package ships OpenSSL 4 headers; swap to OpenSSL 3 development headers instead (`sudo dnf install openssl3-devel`, or `sudo dnf swap openssl-devel openssl3-devel` if OpenSSL 4 headers are already installed—OpenSSL 4 runtime libraries remain untouched). See [`INSTALL.md`](../INSTALL.md).
 2. **Runtime (`Provider routines::cipher operation failed` / `decryption failed or bad record mac`)**:
-   - Even when built against OpenSSL 3, the sensor speaks legacy TLS 1.2 `PSK-AES128-CBC-SHA256` with MAC-then-Encrypt. Under Fedora 45's default OpenSSL configuration, `SSL_accept` may fail unless `fprintd` is given OpenSSL 3's legacy-compatible config via a systemd drop-in (`/etc/systemd/system/fprintd.service.d/goodix-gm168.conf`):
+   - Even when built against OpenSSL 3, the sensor speaks legacy TLS 1.2 `PSK-AES128-CBC-SHA256` with MAC-then-Encrypt. Under Fedora 45's default OpenSSL configuration, `SSL_accept` may fail unless `fprintd` is given OpenSSL 3's legacy-compatible config. The Fedora RPM installs `/usr/lib/systemd/system/fprintd.service.d/60-goodix-gm168-rpm.conf` automatically. For a manual isolated install, create `/etc/systemd/system/fprintd.service.d/goodix-gm168.conf`:
      ```ini
      [Service]
      Environment=OPENSSL_CONF=/etc/pki/tls/openssl3.cnf

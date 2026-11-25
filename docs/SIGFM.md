@@ -23,8 +23,8 @@ flowchart LR
     KNN --> LOWE["Lowe Ratio Filter<br/>d0 < 0.80 * d1 (min 3 matches)"]
     LOWE --> RECIP["Reciprocal 1-NN Gate<br/>enrolled → probe must return the same pair"]
     RECIP --> RANSAC["cv::estimateAffinePartial2D(RANSAC)<br/>reproj=4.0px, maxIters=2000, conf=0.99"]
-    RANSAC --> GUARDS["Degenerate Model Guards<br/>0.80 <= scale <= 1.25<br/>inliers / good_matches >= 0.40"]
-    GUARDS --> SCORE["Return inliers (>= 8 = match)"]
+    RANSAC --> GUARDS["Degenerate Model Guards<br/>0.80 <= scale <= 1.25 (inclusive)<br/>inliers / good_matches >= 0.30"]
+    GUARDS --> SCORE["Return inliers (>= 7 = match)"]
 ```
 
 ### Algorithm Parameters (`libfprint/sigfm/sigfm.cpp`)
@@ -41,11 +41,15 @@ flowchart LR
 | Minimum ratio pairs | `kMinGoodMatches` | `3` | Minimum reciprocal correspondences required before calling `estimateAffinePartial2D` |
 | RANSAC reprojection | `kRansacReprojThreshold` | `4.0 px` | Geometric tolerance in `160x128` pixel coordinates |
 | RANSAC iterations / confidence | `kRansacMaxIters` / `kRansacConfidence` | `2000` / `0.99` | Bounded 4-DoF partial-affine solver |
-| Scale sanity window | `kMinScale` .. `kMaxScale` | `0.80 .. 1.25` | Rejects collapsed/exploded affine fits (`scale = hypot(a00, a01)`) |
-| Minimum inlier fraction | `kMinInlierRatio` | `0.40` | Requires `>= 40%` of reciprocal pairs to agree with the RANSAC model |
+| Scale sanity window | `kMinScale` .. `kMaxScale` | `0.80 .. 1.25` | Rejects collapsed/exploded affine fits (`scale = hypot(a00, a01)`); both boundaries are inclusive |
+| Minimum inlier fraction | `kMinInlierRatio` | `0.30` | Requires `>= 30%` of reciprocal pairs to agree with the RANSAC model |
 | Experimental translation consensus | `SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS` | **off** | Optional post-RANSAC cluster gate for offline A/B tests only; not used by `sigfm_match_score()` or the GM168 driver |
 
 Unlike earlier SIGFM implementations that ran an $O(M^4)$ pairwise length/angle consistency loop, this implementation uses reciprocal nearest neighbours followed by OpenCV's `cv::estimateAffinePartial2D` with explicit `scale` and `inlier_ratio` guards to reject degenerate point-collapse matches cleanly.
+
+The score is **directional**: the forward Lowe-ratio test runs probe → enrolled, and the reciprocal gate is evaluated enrolled → probe, so `sigfm_match_score(a, b)` is not guaranteed to equal `sigfm_match_score(b, a)`. Production matching always scores the freshly captured probe frame against the enrolled template in that order; the driver never transposes the arguments. Matching remains a 4-DoF similarity model (translation, rotation, uniform scale): a full 6-DoF affine matcher was deliberately not enabled without genuine/impostor validation.
+
+Before any matching (including the small-set early return), `sigfm_match_score_with_flags()` validates that every in-memory keypoint field (`pt`, `size`, `angle`, `response`) and every descriptor value is finite. This NaN/Inf validation intentionally runs **before** the `rows < 2` gate: a single non-finite feature in a one-row set is an error (`-1`, fail closed), not a legitimate zero-score non-match. Legitimate empty sets skip the loop and keep their score of `0`.
 
 ## `SGFM` v1 Binary Format and `FP3` Core Integration
 
@@ -68,16 +72,18 @@ Each `SigfmImgInfo` entry serializes into a self-verifying little-endian byte bu
 - `libfprint/sigfm/sigfm.{cpp,hpp}`, `img-info.hpp`, `meson.build`, `tests.cpp`: C++17 `libsigfm` static library (`opencv4 >= 4.5.0`) and `doctest` unit suite (`sigfm-tests`).
 - `libfprint/fp-image.c`, `libfprint/fpi-image.{c,h}`: adds `SigfmImgInfo *sigfm_info` to `FpImage` and async `fpi_image_extract_sigfm_info()` / `_finish()`.
 - `libfprint/fpi-print.{c,h}`, `libfprint/fp-print.c`: adds `FPI_PRINT_SIGFM` to `FpiPrintType`, `FP3` GVariant `(aay)` serialization/deserialization, `fp_print_equal()`, `fp_print_compatible()`, `fpi_print_sigfm_match()`, and `fpi_print_sigfm_max_score()`.
-- `libfprint/fp-image-device.{c,h}`, `libfprint/fpi-image-device.{c,h}`, `libfprint/fpi-device.c`: adds `algorithm`, `sigfm_dup_threshold`, and `sigfm_verify_retries` to `FpImageDeviceClass`, routes capture completion to async SIGFM extraction, enforces anti-dup during enroll, and applies verify auto-retry.
-- `meson.build`, `libfprint/meson.build`, `tests/meson.build`, `tests/test-fpi-sigfm.c`, `libfprint/fprint-list-udev-hwdb.c`: wires `HAVE_SIGFM`, enforces OpenSSL 3 for `goodix_gm168`, builds `fpi-sigfm`, and removes `27c6:589a` from the unsupported hwdb blocklist.
+- `libfprint/fp-image-device.{c,h}`, `libfprint/fpi-image-device.{c,h}`, `libfprint/fpi-device.c`: adds `algorithm`, `sigfm_dup_threshold`, `sigfm_verify_retries`, `sigfm_min_keypoints`, and `sigfm_min_coverage` to `FpImageDeviceClass`, short-circuits `IDENTIFY` on `NULL`/empty galleries, routes capture completion to async SIGFM extraction with deferred deactivation, enforces anti-dup during enroll, and applies verify auto-retry.
+- `meson.build`, `libfprint/meson.build`, `tests/meson.build`, `tests/test-fpi-sigfm.c`, `libfprint/fprint-list-udev-hwdb.c`: wires `HAVE_SIGFM`, enforces OpenSSL 3 for `goodix_gm168`, builds `libfprint_static_dep` and `fpi-sigfm`, and removes `27c6:589a` from the unsupported hwdb blocklist.
 
-## Asynchronous Feature Extraction
+## Asynchronous Feature Extraction and `REARM` Overlap
 
-When `driver/goodix_gm168.c` submits an `FpImage` via `fpi_image_device_image_captured()`:
+When `driver/goodix_gm168.c` captures a usable frame (`quality > 0.0f`):
 
-1. `fpi_image_device_image_captured()` sees `priv->algorithm == FPI_PRINT_SIGFM` and launches `fpi_image_extract_sigfm_info()` while transitioning to `AWAIT_FINGER_OFF`.
-2. An atomic CAS on `self->detection_in_progress` prevents concurrent extraction on the same `FpImage` (`G_IO_ERROR_ADDRESS_IN_USE`).
-3. `fpi_image_extract_sigfm_thread_func()` copies and normalizes image data for `FPI_IMAGE_H_FLIPPED`, `FPI_IMAGE_V_FLIPPED`, and `FPI_IMAGE_COLORS_INVERTED` (clearing those normalization flags while preserving `FPI_IMAGE_PARTIAL`), runs `sigfm_extract()` and `sigfm_image_coverage()` off the main loop, and stores both the feature set and normalized-frame coverage. Empty feature sets are valid extraction results; `FpImageDevice` applies the driver-specific quality policy and returns `FP_DEVICE_RETRY_CENTER_FINGER` instead of treating them as an internal extraction failure.
+1. `gm168_submit_capture()` calls `fpi_image_device_report_finger_status(..., TRUE)` and `fpi_image_device_image_captured()` **before** starting `REARM` (`GM168_CAPTURE_SETTLE_MS = 220 ms` and `wait_lift` default `150 ms`). Zero-quality dual pairs or zero-quality fallbacks are discarded before this point and generate no libfprint retry or verify attempt.
+2. `fpi_image_device_image_captured()` sees `priv->algorithm == FPI_PRINT_SIGFM` and launches `fpi_image_extract_sigfm_info()` while transitioning to `AWAIT_FINGER_OFF`.
+3. `dev_change_state(AWAIT_FINGER_OFF)` holds off `report_finger_status(FALSE)` until `rearm_completed()` / `recover_completed()`, so `GTask` extraction and verify/identify matching run in parallel with `REARM` discharge and `wait_lift`. A match can therefore be reported before finger lift while deactivation waits cleanly for `finger-off`.
+4. An atomic CAS on `self->detection_in_progress` prevents concurrent extraction on the same `FpImage` (`G_IO_ERROR_ADDRESS_IN_USE`).
+5. `fpi_image_extract_sigfm_thread_func()` copies and normalizes image data for `FPI_IMAGE_H_FLIPPED`, `FPI_IMAGE_V_FLIPPED`, and `FPI_IMAGE_COLORS_INVERTED` (clearing those normalization flags while preserving `FPI_IMAGE_PARTIAL`), runs `sigfm_extract()` and `sigfm_image_coverage()` off the main loop, and stores both the feature set and normalized-frame coverage. Empty feature sets are valid extraction results; `FpImageDevice` applies the driver-specific quality policy and returns `FP_DEVICE_RETRY_CENTER_FINGER` instead of treating them as an internal extraction failure.
 
 ## Driver Parameters, 20 Stages, Anti-Dup, and Verify Auto-Retry
 
@@ -87,7 +93,7 @@ When `driver/goodix_gm168.c` submits an `FpImage` via `fpi_image_device_image_ca
 |---|---|---:|---|
 | Matching algorithm | `img_class->algorithm` | `FPI_PRINT_SIGFM` | Routes extraction, serialization, and matching through SIGFM |
 | Enrollment stages | `GM168_NR_ENROLL_STAGES` | `20` | Provides spatial coverage across the small `4 × 3.2 mm` sensor pad |
-| Match threshold | `GM168_SIGFM_THRESHOLD` | `8` | Minimum RANSAC inliers against any enrolled stage in `FpPrint` |
+| Match threshold | `GM168_SIGFM_THRESHOLD` (`$GM168_SIGFM_THRESHOLD`, `4..1000`) | `7` (provisional) | Minimum RANSAC inliers against any enrolled stage in `FpPrint`; the env override exists for A/B testing and rollback |
 | Enroll anti-dup threshold | `GM168_SIGFM_DUP_THRESHOLD` (`$GM168_DUP_THRESH`, `0..1000`) | `15` | Rejects stages scoring `>= 15` against existing stages with `FP_DEVICE_RETRY_GENERAL` ("Duplicate finger placement, please shift finger"); stops rejecting after `SIGFM_MAX_CONSECUTIVE_DUP_REJECTS = 6` consecutive duplicates so enrollment cannot stall |
 | Verify auto-retry count | `GM168_SIGFM_VERIFY_RETRIES` (`$GM168_VERIFY_RETRIES`, `0..5`) | `2` | On `IDENTIFY` no-match, emits `FP_DEVICE_RETRY_GENERAL` up to `2` times (allowing up to `3` touches per verification attempt) before reporting final no-match; resets on match, cancel, close, or fatal error |
 | Minimum keypoints | `GM168_SIGFM_MIN_KEYPOINTS` (`$GM168_SIGFM_MIN_KEYPOINTS`, `0..1000`) | `30` | Rejects feature-poor frames with `FP_DEVICE_RETRY_CENTER_FINGER`; `0` disables this gate |
@@ -105,16 +111,22 @@ This gate is distinct from the driver's earlier central-contrast/dual-capture he
 
 The `30` / `0.55` values are provisional capture-policy heuristics adapted from a different `80x64` Goodix pipeline. They are **not** calibrated GM168 FAR/FRR parameters and still require live A/B validation on the GM168 `160x128` preprocessing path.
 
+### Empty-Gallery `IDENTIFY` Short-Circuit
+
+In `fp_image_device_start_capture_action()` (`libfprint/fp-image-device.c`), an `FPI_DEVICE_ACTION_IDENTIFY` call with a `NULL` or empty (`len == 0`) gallery (after verifying any template types) resets `verify_retry_count` and `verify_retry_pending`, immediately invokes `fpi_device_identify_report(device, NULL, NULL, NULL)` followed by `fpi_device_identify_complete(device, NULL)`, and returns **without** calling `activate()`, `change_state()`, or running SIGFM verify retries. A user is never asked for futile touches when no enrolled print exists to match against.
+
 ### Deferred Deactivation
 
-A non-cancelling deactivation request is held in `action_pending_deactivation` while the finger is present or asynchronous feature extraction is active. The request is resumed only after both conditions clear; final enrollment therefore cannot tear down USB state while the final frame is still being processed, and verify deactivation does not race SIFT. Explicit cancellation always bypasses this deferral. This core lifecycle guard complements—but does not replace—the GM168 `REARM`/generation/cancellation state machines.
+A non-cancelling deactivation request is held in `action_pending_deactivation` while the finger is present or asynchronous feature extraction is active. The request is resumed only after both conditions clear. Because GM168 submits usable frames before `REARM`/`wait_lift`, `identify`/`verify` matching can report a match and request deactivation while `finger_present` is still `TRUE`; the barrier holds `DEINIT` until `rearm_completed()` / `recover_completed()` emits `finger_status(FALSE)` and extraction finishes, so `REARM` is not cancelled underneath the match. Final enrollment likewise cannot tear down USB state while the final frame is still being extracted. Explicit cancellation bypasses this core deferral, but the GM168 driver applies its own bounded `REARM` drain before `DEINIT` so an early successful match cannot disarm FDT for the next activation.
+
+Late extraction callbacks are additionally gated after `*_finish()`: if a fatal session error is pending or the device is already `DEACTIVATING`/`INACTIVE`, the callback completes the pending action without reporting enroll progress or identify matches. Enrollment can re-enter `AWAIT_FINGER_ON` only from `IDLE` while the device is still active. This closes the fatal-`REARM`/`RECOVER` versus asynchronous-SIGFM race without delaying USB removal; client cancellation during active `REARM` is bounded separately by the driver's existing watchdog. These core lifecycle guards complement—but do not replace—the GM168 `REARM`/generation/cancellation state machines.
 
 ### Translation-Consensus A/B Switch (Default Off)
 
 `sigfm_match_score_with_flags()` exposes two internal experimental switches for deterministic offline comparisons:
 
 - `SIGFM_MATCH_FLAG_FORWARD_ONLY` ablates reciprocal matching and reproduces the former one-way candidate path.
-- `SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS` projects RANSAC inliers through the accepted similarity model, clusters their residual translations within `4 px`, and applies the existing `0.40` fraction guard to the largest cluster.
+- `SIGFM_MATCH_FLAG_TRANSLATION_CONSENSUS` projects RANSAC inliers through the accepted similarity model, clusters their residual translations within `4 px`, and applies the existing `0.30` fraction guard to the largest cluster.
 
 Production `sigfm_match_score()` uses reciprocal matching with translation consensus **disabled**. The synthetic suite exercises both switches but does not establish a genuine/impostor advantage. Enable translation consensus in the driver only after comparing both variants on identical saved GM168 frames, with fixed RANSAC seeds and separately reported genuine and impostor outcomes. No production threshold or template-format change is currently authorized by the synthetic A/B test.
 
@@ -124,7 +136,8 @@ Production `sigfm_match_score()` uses reciprocal matching with translation conse
 
 ## Accuracy and FAR / FRR Limitations
 
-- **Limited hardware sample**: `GM168_SIGFM_THRESHOLD = 8` was chosen from offline evaluation on one `27c6:589a` device (`GFUSB_GM168SEC_APP_10036`), where non-overlapping same-finger zones peaked at `5` raw inliers (`0/300 >= 6` with the production `scale` + `inlier_ratio` guards) and genuine overlaps scored `12..68+`, followed by limited live enrollment (`20/20`) and verification (`5/5`, `FAR=0` on a small impostor sample). Those live results predate reciprocal matching, the SIGFM coverage gate, and deferred deactivation; they are historical baseline evidence, not live validation of the revised implementation.
-- **Current revision: offline proof only**: reciprocal many-to-one rejection, tiled-coverage classification, lifecycle guards, frame decoding, and the opt-in translation-consensus path have synthetic regression tests. No post-change live enroll/verify or genuine/impostor A/B run has been performed.
+- **Limited hardware sample**: `GM168_SIGFM_THRESHOLD = 8` was chosen from offline evaluation on one `27c6:589a` device (`GFUSB_GM168SEC_APP_10036`), where non-overlapping same-finger zones peaked at `5` raw inliers and genuine overlaps scored `12..68+`. Those early results predate reciprocal matching, the SIGFM coverage gate, deferred deactivation, overlapped `REARM` submission, zero-quality false-touch drop, the empty-gallery shortcut, and the current threshold/inlier-ratio retunes; they are historical baseline evidence only. The current defaults — match threshold `7` and `kMinInlierRatio = 0.30` — remain provisional. Offline suites pass, and a post-reset owner smoke on the same device completed `20/20` enrollment plus five successful verification sessions (four first-touch matches and one match after retry). That short run had no final `verify-no-match`, watchdog, or TLS error, but it was not a controlled old/new A/B or impostor evaluation. No FAR/FRR, `FAR=0`, or accuracy-improvement claim is made for the retuned defaults.
+- **Current validation boundary**: reciprocal matching, coverage, lifecycle guards, and frame decoding retain synthetic regression coverage. An earlier owner-run clean live test observed the empty-gallery shortcut, zero-quality drop, and three bounded cancellation-drain cycles without `stale device operation` or failed `REARM`/`DEINIT`. The newer post-retune smoke above does not replace those lifecycle checks and is neither a population FAR/FRR measurement nor a timing guarantee.
+- **Known placement/coverage limitation**: in a separate owner-run sequence, displaced or angled `right-thumb` placements produced high-quality captures but SIGFM scores of only about `0..5/8` and repeated `verify-no-match`. This single-finger observation does not isolate whether enrollment coverage, pose, or matcher behavior is the root cause. Improving displaced/angled-finger matching requires follow-up same-gallery A/B work; lowering the retry count would improve UX only and would not raise the match score.
 - **Not population-validated**: true False Accept Rate (FAR) and False Reject Rate (FRR) across diverse users, skin conditions, and independent `27c6:589a` devices have **not** been measured.
-- **Retry multiplier**: setting `GM168_SIGFM_VERIFY_RETRIES = 2` reduces false rejections caused by touching an uncovered edge of the `4 × 3.2 mm` pad, at the cost of granting an impostor up to `3` touches per authentication session. Always retain password fallback for login, `sudo`, and `polkit`.
+- **Retry multiplier**: setting `GM168_SIGFM_VERIFY_RETRIES = 2` reduces false rejections caused by touching an uncovered edge of the `4 × 3.2 mm` pad, at the cost of granting an impostor up to `3` touches per authentication session. In the observed displaced/angled-finger sequence, client retries multiplied by the internal retry budget produced nine scans without improving the low scores. Reducing this budget is a possible UX follow-up, not a matching-accuracy fix. Always retain password fallback for login, `sudo`, and `polkit`.
