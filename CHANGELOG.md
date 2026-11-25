@@ -122,9 +122,11 @@ All notable changes to the `goodix-gm168` overlay are documented in this file.
   `ldconfig` wiring, and duplicate `plugdev` udev rules.
 - Updated `tools/apply-overlay.sh`, `tests/test_timeouts.c`, `.gitignore`,
   `NOTICE`, `SECURITY.md`, `CONTRIBUTING.md`, `INSTALL.md`, and `docs/`.
-  `README.md` is now a short Russian user guide focused on the ready-made RPM;
-  protocol, matching, recovery, and development details remain linked under
-  `docs/`, and the complete contributor credits are retained.
+  `README.md` is now a short English user guide with a Russian equivalent in
+  `README.ru.md`, both focused on the ready-made RPM and linked by an RU/EN
+  language switch. Protocol, matching, recovery, and development details remain
+  under `docs/`, and the complete contributor credits are retained in both
+  languages.
 
 ### Fixed
 - Background receive now processes every non-empty transfer, drains all ready

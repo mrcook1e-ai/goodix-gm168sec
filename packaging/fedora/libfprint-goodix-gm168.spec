@@ -139,6 +139,7 @@ install -m 0644 \
     %{buildroot}%{_unitdir}/fprintd.service.d/60-goodix-gm168-rpm.conf
 
 install -D -m 0644 goodix-gm168-%{version}/README.md        %{buildroot}%{_docdir}/%{name}/README.md
+install -D -m 0644 goodix-gm168-%{version}/README.ru.md     %{buildroot}%{_docdir}/%{name}/README.ru.md
 install -D -m 0644 goodix-gm168-%{version}/INSTALL.md       %{buildroot}%{_docdir}/%{name}/INSTALL.md
 install -D -m 0644 goodix-gm168-%{version}/NOTICE           %{buildroot}%{_docdir}/%{name}/NOTICE
 install -D -m 0644 goodix-gm168-%{version}/SECURITY.md      %{buildroot}%{_docdir}/%{name}/SECURITY.md

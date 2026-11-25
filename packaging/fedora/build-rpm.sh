@@ -20,7 +20,7 @@ readonly UPSTREAM_URL="https://gitlab.freedesktop.org/libfprint/libfprint.git"
 readonly -a OVERLAY_PATHS=(
     driver tests patches packaging docs
     .github/workflows/release-rpm.yml
-    README.md INSTALL.md NOTICE SECURITY.md CONTRIBUTING.md AGENTS.md LICENSE
+    README.md README.ru.md INSTALL.md NOTICE SECURITY.md CONTRIBUTING.md AGENTS.md LICENSE
     CHANGELOG.md
 )
 

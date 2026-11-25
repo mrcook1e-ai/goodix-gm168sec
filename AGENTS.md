@@ -12,7 +12,7 @@ Keep changes strictly separated by responsibility:
 - `tests/` — Standalone compile-time timeout/background contract plus runtime checks (`tests/test_timeouts.c`): `_Static_assert` pins on `driver/gm168_timeouts.h` (including the `GM168_CAPTURE_SETTLE_MS` default and clamp range) and `GM168_BG_MIN_MEAN_DEFAULT` from `driver/gm168_capture_policy.h`, the runtime cancellation-lifecycle predicate matrix, and synthetic-buffer runtime checks of the dual-frame pick (`gm168_dual_pick`), effective rank (`gm168_effective_rank`), and raw rank (`gm168_raw_rank`) helpers. PSK recovery tests (`tests/test-goodix-gm168-psk-recovery.c`), SIGFM tests (`tests/test-fpi-sigfm.c`, `libfprint/sigfm/tests.cpp`), and the packed-frame layout test (`tests/test-goodix-gm168-frame-layout.c`) run inside the patched `libfprint` build tree.
 - `packaging/` — Udev `uaccess` rule (`packaging/udev/70-goodix-gm168.rules`), isolated Fedora 45 RPM spec (`packaging/fedora/libfprint-goodix-gm168.spec`), reproducible RPM helper (`packaging/fedora/build-rpm.sh`), and `fprintd` drop-in (`packaging/fedora/fprintd-goodix-gm168.conf`). The RPM keeps the private library in `/opt/libfprint-gm168` and must not replace/provide/conflict with system `libfprint`.
 - `.github/workflows/release-rpm.yml` — Fedora 45 container build, offline RPM checks/artifacts, and `v*` tag prerelease publication. CI never performs live hardware validation.
-- `docs/` & root policies (`README.md`, `INSTALL.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`) — Curated technical documentation and safety boundaries.
+- `docs/` & root policies (`README.md` (English), `README.ru.md` (Russian), `INSTALL.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `NOTICE`) — Curated technical documentation and safety boundaries. Keep both user guides synchronized and retain the RU/EN language switch and complete credits.
 
 Never recreate legacy `src/`, `gm168_cal.h`, Windows Frida/unseal scripts, or experimental `10019` / `0xE0` flash scripts in this repository.
 
@@ -155,6 +155,6 @@ All unit tests and KATs must use strictly synthetic inputs and fixtures.
 
 ## Documentation Synchronization Rules
 
-- Whenever state machines, protocol constants, PSK recovery gates, SIGFM parameters, or build/test procedures change, update the matching documents under `docs/` (`README.md`, `ARCHITECTURE.md`, `STATE-MACHINES.md`, `PROTOCOL.md`, `PSK-RECOVERY.md`, `IMAGE-PIPELINE.md`, `SIGFM.md`, `TESTING.md`, `DEVELOPMENT.md`, `SECURITY.md`, `FAQ.md`), root `README.md`, `INSTALL.md`, `CHANGELOG.md`, and `AGENTS.md`.
+- Whenever state machines, protocol constants, PSK recovery gates, SIGFM parameters, or build/test procedures change, update the matching documents under `docs/` (`README.md`, `ARCHITECTURE.md`, `STATE-MACHINES.md`, `PROTOCOL.md`, `PSK-RECOVERY.md`, `IMAGE-PIPELINE.md`, `SIGFM.md`, `TESTING.md`, `DEVELOPMENT.md`, `SECURITY.md`, `FAQ.md`), root `README.md` / `README.ru.md`, `INSTALL.md`, `CHANGELOG.md`, and `AGENTS.md`.
 - Always distinguish **offline synthetic proof** from **live hardware proof**.
 - Never fabricate hardware support, firmware compatibility, suspend/resume reliability, or FAR/FRR claims; document all unvalidated boundaries explicitly.
